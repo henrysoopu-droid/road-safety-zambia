@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Sign in · Road Safety in Zambia{% endblock %}
+{% block content %}
+<section class="auth-layout">
+    <div class="auth-panel">
+        <p class="eyebrow">Authorized access only</p>
+        <h1>Road Safety in Zambia</h1>
+        <p class="lede">Traffic Control Analysis System</p>
+        <p class="auth-note">Sign in to review road videos, signs, markings, and analysis modules.</p>
+        <form method="post" novalidate class="auth-form">
+            {{ form.hidden_tag() }}
+            {{ form.username.label }}
+            {{ form.username(id="username", autocomplete="username", autofocus=true) }}
+            {% for error in form.username.errors %}
+                <p class="field-error">{{ error }}</p>
+            {% endfor %}
+
+            {{ form.password.label }}
+            {{ form.password(id="password", autocomplete="current-password") }}
+            {% for error in form.password.errors %}
+                <p class="field-error">{{ error }}</p>
+            {% endfor %}
+
+            {{ form.submit(class_="btn btn-primary") }}
+        </form>
+        <p class="auth-help">Accounts are created by an administrator. There is no public registration.</p>
+    </div>
+</section>
+{% endblock %}

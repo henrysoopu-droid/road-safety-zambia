@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block title %}{{ video.title }} · Road Videos{% endblock %}
+{% block content %}
+<section class="page-intro">
+    <p class="eyebrow">Road Videos</p>
+    <h1>{{ video.title }}</h1>
+    <p class="lede">{{ video.location }}</p>
+    <p>Uploaded by {{ video.uploader.username }} on {{ video.uploaded_at.strftime("%d %b %Y, %H:%M") }}</p>
+</section>
+
+<section class="panel manage-panel">
+    <video class="video-player" controls preload="metadata">
+        <source src="{{ url_for('videos.media', video_id=video.id) }}" type="{{ media_type }}">
+        Your browser does not support embedded video playback.
+    </video>
+    <p class="video-meta">Original file: {{ video.original_filename }}</p>
+    {% if video.description %}
+        <p>{{ video.description }}</p>
+    {% endif %}
+    <p class="muted-ink">This video is stored for later frame extraction and traffic-control analysis. Detection is not run in this module.</p>
+    <section class="frame-tools">
+        <h2>Frame extraction</h2>
+        <p>Extract one frame at a controlled interval for later analysis. Existing extracted frames will be replaced.</p>
+        <form method="post" action="{{ url_for('videos.extract', video_id=video.id) }}" class="extract-form">
+            {{ extraction_form.hidden_tag() }}
+            {{ extraction_form.interval_seconds.label }}
+            {{ extraction_form.interval_seconds(min=1, max=3600) }}
+            {% for error in extraction_form.interval_seconds.errors %}<p class="field-error">{{ error }}</p>{% endfor %}
+            {{ extraction_form.submit(class_="btn btn-primary btn-compact") }}
+        </form>
+    </section>
+    <section class="frame-tools detection-tools">
+        <h2>Traffic-sign detection</h2>
+        <p>Run the pretrained detector on the extracted frames only. Detection does not run during upload or frame extraction.</p>
+        <form method="post" action="{{ url_for('videos.detect_signs', video_id=video.id) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="btn btn-secondary btn-compact">Detect Traffic Signs</button>
+        </form>
+        {% if detections %}
+            <p class="detection-summary">{{ detections|length }} detection(s) stored.</p>
+            <div class="detection-list">
+                {% for detection in detections %}
+                    <article class="detection-item">
+                        <div>
+                            <h3>{{ detection.class_name }}</h3>
+                            <p class="video-meta">Confidence: {{ "%.1f"|format(detection.confidence * 100) }}% · Frame {{ detection.frame_number }} · {{ "%.2f"|format(detection.timestamp_seconds) }}s</p>
+                            <p class="video-meta">Box: {{ "%.0f"|format(detection.x_min) }}, {{ "%.0f"|format(detection.y_min) }} to {{ "%.0f"|format(detection.x_max) }}, {{ "%.0f"|format(detection.y_max) }}</p>
+                        </div>
+                        {% if detection.annotated_filename %}
+                            <img class="detection-image" src="{{ url_for('videos.detection_media', video_id=video.id, filename=detection.annotated_filename) }}" alt="{{ detection.class_name }} detection at frame {{ detection.frame_number }}" loading="lazy">
+                        {% endif %}
+                    </article>
+                {% endfor %}
+            </div>
+        {% else %}
+            <p class="muted-ink">No traffic-sign detections stored yet.</p>
+        {% endif %}
+    </section>
+    <section id="frames" class="frame-gallery">
+        <h2>Extracted frames{% if video.frames %} ({{ video.frames|length }}){% endif %}</h2>
+        {% if video.frames %}
+            <div class="frame-grid">
+                {% for frame in video.frames %}
+                    <figure class="frame-item">
+                        <img src="{{ url_for('videos.frame_media', video_id=video.id, frame_id=frame.id) }}" alt="Frame {{ frame.frame_number }} at {{ '%.2f'|format(frame.timestamp_seconds) }} seconds" loading="lazy">
+                        <figcaption>Frame {{ frame.frame_number }} · {{ "%.2f"|format(frame.timestamp_seconds) }}s</figcaption>
+                    </figure>
+                {% endfor %}
+            </div>
+        {% else %}
+            <p class="muted-ink">No frames extracted yet.</p>
+        {% endif %}
+    </section>
+    <div class="video-actions">
+        <a class="btn btn-primary btn-compact" href="{{ url_for('videos.library') }}">Back to library</a>
+        {% if current_user.is_admin() %}
+            <form method="post" action="{{ url_for('videos.delete', video_id=video.id) }}" onsubmit="return confirm('Delete this road video?');">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <button type="submit" class="btn btn-danger btn-compact">Delete</button>
+            </form>
+        {% endif %}
+    </div>
+</section>
+{% endblock %}

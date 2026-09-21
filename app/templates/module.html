@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}{{ module.title }} · Road Safety in Zambia{% endblock %}
+{% block meta_description %}{{ module.title }} information from the Road Safety in Zambia Traffic Control Analysis System. Current capabilities and planned research are described here.{% endblock %}
+{% block content %}
+<section class="page-intro">
+    <p class="eyebrow">Public information</p>
+    <h1>{{ module.title }}</h1>
+    <p class="lede">{{ module.status }}</p>
+    <p>{{ module.summary }}</p>
+</section>
+<section class="panel">
+    <h2>Planned for later versions</h2>
+    <ul class="planned-list">
+        {% for item in module.planned %}
+            <li>{{ item }}</li>
+        {% endfor %}
+    </ul>
+    <p class="muted">This module is reserved. No analysis data is generated in Version 1.</p>
+</section>
+{% endblock %}

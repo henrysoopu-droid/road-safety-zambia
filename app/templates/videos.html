@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block title %}Road Videos · Road Safety in Zambia{% endblock %}
+{% block content %}
+<section class="page-intro">
+    <p class="eyebrow">Authorized module</p>
+    <h1>Road Videos</h1>
+    <p class="lede">Traffic Control Analysis System</p>
+    <p>Upload and organise recorded road footage. Later versions will use these files for frame extraction, road sign detection, and road marking analysis.</p>
+</section>
+
+<section class="panel manage-panel">
+    <h2>Upload a road video</h2>
+    <p>Accepted formats: MP4, AVI, MOV, MKV, and WEBM. Files are stored on the server, not inside the database.</p>
+    <form method="post" enctype="multipart/form-data" novalidate class="upload-form">
+        {{ form.hidden_tag() }}
+        {{ form.title.label }}
+        {{ form.title(id="title", autocomplete="off") }}
+        {% for error in form.title.errors %}
+            <p class="field-error">{{ error }}</p>
+        {% endfor %}
+
+        {{ form.location.label }}
+        {{ form.location(id="location", autocomplete="off") }}
+        {% for error in form.location.errors %}
+            <p class="field-error">{{ error }}</p>
+        {% endfor %}
+
+        {{ form.description.label }}
+        {{ form.description(id="description", rows="4") }}
+        {% for error in form.description.errors %}
+            <p class="field-error">{{ error }}</p>
+        {% endfor %}
+
+        {{ form.video.label }}
+        {{ form.video(id="video", accept=".mp4,.avi,.mov,.mkv,.webm,video/mp4,video/webm,video/quicktime") }}
+        {% for error in form.video.errors %}
+            <p class="field-error">{{ error }}</p>
+        {% endfor %}
+
+        {{ form.submit(class_="btn btn-primary btn-compact") }}
+    </form>
+</section>
+
+<section class="panel manage-panel video-library">
+    <h2>Video library</h2>
+    {% if videos %}
+        <div class="video-list">
+            {% for video in videos %}
+                <article class="video-item">
+                    <div>
+                        <h3>{{ video.title }}</h3>
+                        <p class="video-meta">Location: {{ video.location }}</p>
+                        <p class="video-meta">Original file: {{ video.original_filename }}</p>
+                        <p class="video-meta">Uploaded by: {{ video.uploader.username }} · {{ video.uploaded_at.strftime("%d %b %Y, %H:%M") }}</p>
+                        {% if video.description %}
+                            <p>{{ video.description }}</p>
+                        {% endif %}
+                    </div>
+                    <div class="video-actions">
+                        <a class="btn btn-primary btn-compact" href="{{ url_for('videos.watch', video_id=video.id) }}">View / Play</a>
+                        <a class="btn btn-secondary btn-compact" href="{{ url_for('videos.watch', video_id=video.id) }}#frames">Frames{% if video.frames %} ({{ video.frames|length }}){% endif %}</a>
+                        {% if current_user.is_admin() %}
+                            <form method="post" action="{{ url_for('videos.delete', video_id=video.id) }}" onsubmit="return confirm('Delete this road video?');">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                                <button type="submit" class="btn btn-danger btn-compact">Delete</button>
+                            </form>
+                        {% endif %}
+                    </div>
+                </article>
+            {% endfor %}
+        </div>
+    {% else %}
+        <p>No road videos have been uploaded yet.</p>
+    {% endif %}
+</section>
+{% endblock %}

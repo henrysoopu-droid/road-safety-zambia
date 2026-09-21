@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}First-time setup · Road Safety in Zambia{% endblock %}
+{% block content %}
+<section class="auth-layout">
+    <div class="auth-panel">
+        <p class="eyebrow">First-time setup</p>
+        <h1>Road Safety in Zambia</h1>
+        <p class="lede">Traffic Control Analysis System</p>
+        <p class="auth-note">No users were found. Create the first administrator account.</p>
+        <form method="post" novalidate class="auth-form">
+            {{ form.hidden_tag() }}
+            {{ form.username.label }}
+            {{ form.username(id="username", autocomplete="username", autofocus=true) }}
+            {% for error in form.username.errors %}
+                <p class="field-error">{{ error }}</p>
+            {% endfor %}
+
+            {{ form.password.label }}
+            {{ form.password(id="password", autocomplete="new-password") }}
+            {% for error in form.password.errors %}
+                <p class="field-error">{{ error }}</p>
+            {% endfor %}
+
+            {{ form.confirm_password.label }}
+            {{ form.confirm_password(id="confirm_password", autocomplete="new-password") }}
+            {% for error in form.confirm_password.errors %}
+                <p class="field-error">{{ error }}</p>
+            {% endfor %}
+
+            {{ form.submit(class_="btn btn-primary") }}
+        </form>
+        <p class="auth-help">This setup is available only while the database has no users.</p>
+    </div>
+</section>
+{% endblock %}

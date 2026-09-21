@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}Dashboard · Road Safety in Zambia{% endblock %}
+{% block content %}
+<section class="page-intro">
+    <p class="eyebrow">{{ dashboard_role }} Dashboard</p>
+    <h1>Road Safety in Zambia</h1>
+    <p class="lede">Traffic Control Analysis System</p>
+    <p>Signed in as <strong>{{ current_user.username }}</strong> · Role: <strong>{{ current_user.role|capitalize }}</strong></p>
+</section>
+
+<section class="card-grid">
+    <a class="card" href="{{ url_for('videos.library') }}" data-module="videos">
+        <p class="card-kicker">Module</p>
+        <h2>Road Videos</h2>
+        <p>Upload and organise recorded road footage for later analysis.</p>
+        <span class="badge">Available</span>
+    </a>
+    <a class="card" href="{{ url_for('main.signs') }}" data-module="signs">
+        <p class="card-kicker">Module</p>
+        <h2>Road Signs</h2>
+        <p>Detect, classify, and store traffic signs from road footage.</p>
+        <span class="badge">Coming Soon</span>
+    </a>
+    <a class="card" href="{{ url_for('main.markings') }}" data-module="markings">
+        <p class="card-kicker">Module</p>
+        <h2>Road Markings</h2>
+        <p>View, analyse, and assess the condition of road markings.</p>
+        <span class="badge">Coming Soon</span>
+    </a>
+    <a class="card" href="{{ url_for('main.results') }}" data-module="results">
+        <p class="card-kicker">Module</p>
+        <h2>Analysis Results</h2>
+        <p>Review detected signs, markings, condition, and frame-level findings.</p>
+        <span class="badge">Coming Soon</span>
+    </a>
+    {% if current_user.is_admin() %}
+    <a class="card" href="{{ url_for('auth.users') }}">
+        <p class="card-kicker">Administration</p>
+        <h2>User Management</h2>
+        <p>Create accounts and enable or disable authorized users.</p>
+        <span class="badge">Admin only</span>
+    </a>
+    {% endif %}
+</section>
+{% endblock %}

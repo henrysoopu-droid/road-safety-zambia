@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Road Safety in Zambia | Traffic Control Analysis System{% endblock %}</title>
+    <meta name="description" content="{% block meta_description %}Road Safety in Zambia: a traffic control analysis system for road signs, road markings, and road safety video research.{% endblock %}">
+    <meta name="robots" content="index, follow">
+    <link rel="canonical" href="{{ config['SITE_URL'] }}{{ request.path }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body class="{% if not current_user.is_authenticated %}is-auth{% endif %}">
+    <div class="app-shell">
+        {% if current_user.is_authenticated %}
+        <header class="topbar">
+            <div class="brand">
+                <span class="brand-mark" aria-hidden="true"></span>
+                <div>
+                    <p class="brand-title">Road Safety in Zambia</p>
+                    <p class="brand-subtitle">Traffic Control Analysis System</p>
+                </div>
+            </div>
+            <nav class="nav">
+                <a href="{{ url_for('main.dashboard') }}">Dashboard</a>
+                <a href="{{ url_for('videos.library') }}">Road Videos</a>
+                <a href="{{ url_for('main.signs') }}">Road Signs</a>
+                <a href="{{ url_for('main.markings') }}">Road Markings</a>
+                <a href="{{ url_for('main.results') }}">Analysis Results</a>
+            </nav>
+            <div class="session">
+                <p class="session-user">{{ current_user.username }}</p>
+                <p class="session-role">{{ current_user.role|capitalize }}</p>
+                <form method="post" action="{{ url_for('auth.logout') }}">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <button type="submit" class="btn btn-ghost">Log out</button>
+                </form>
+            </div>
+        </header>
+        {% else %}
+        <header class="public-topbar">
+            <a class="public-brand" href="{{ url_for('main.index') }}">Road Safety in Zambia</a>
+            <nav class="public-nav" aria-label="Public navigation">
+                <a href="{{ url_for('main.index') }}">Home</a>
+                <a href="{{ url_for('main.signs') }}">Road Signs</a>
+                <a href="{{ url_for('main.markings') }}">Road Markings</a>
+                <a href="{{ url_for('main.results') }}">Analysis Results</a>
+                <a href="{{ url_for('main.about') }}">About</a>
+                <a href="{{ url_for('auth.login') }}">Authorized Login</a>
+            </nav>
+        </header>
+        {% endif %}
+
+        <main class="content{% if not current_user.is_authenticated %} content-auth{% endif %}">
+            {% with messages = get_flashed_messages(with_categories=true) %}
+                {% if messages %}
+                    <div class="flash-stack">
+                        {% for category, message in messages %}
+                            <div class="flash flash-{{ category }}">{{ message }}</div>
+                        {% endfor %}
+                    </div>
+                {% endif %}
+            {% endwith %}
+            {% block content %}{% endblock %}
+        </main>
+    </div>
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html>

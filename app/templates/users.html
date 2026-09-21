@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}User Management · Road Safety in Zambia{% endblock %}
+{% block content %}
+<section class="page-intro">
+    <p class="eyebrow">Admin only</p>
+    <h1>User Management</h1>
+    <p class="lede">Manage authorized access to the system.</p>
+</section>
+<section class="panel manage-panel user-management">
+    <h2>Create a user</h2>
+    <form method="post" novalidate class="user-form">
+        {{ form.hidden_tag() }}
+        {{ form.username.label }}
+        {{ form.username(autocomplete="off") }}
+        {% for error in form.username.errors %}<p class="field-error">{{ error }}</p>{% endfor %}
+        {{ form.password.label }}
+        {{ form.password(autocomplete="new-password") }}
+        {% for error in form.password.errors %}<p class="field-error">{{ error }}</p>{% endfor %}
+        {{ form.role.label }}
+        {{ form.role }}
+        {% for error in form.role.errors %}<p class="field-error">{{ error }}</p>{% endfor %}
+        {{ form.submit(class_="btn btn-primary btn-compact") }}
+    </form>
+</section>
+<section class="panel manage-panel video-library">
+    <h2>Existing users</h2>
+    <div class="user-list">
+        {% for user in users %}
+        <article class="user-item">
+            <div><h3>{{ user.username }}</h3><p class="video-meta">{{ user.role|capitalize }} · {% if user.active %}Enabled{% else %}Disabled{% endif %}</p></div>
+            {% if user.id == current_user.id %}<span class="badge">Current account</span>{% else %}
+            <form method="post" action="{{ url_for('auth.toggle_user', user_id=user.id) }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <button type="submit" class="btn btn-compact {% if user.active %}btn-danger{% else %}btn-primary{% endif %}">{% if user.active %}Disable{% else %}Enable{% endif %}</button>
+            </form>{% endif %}
+        </article>
+        {% endfor %}
+    </div>
+</section>
+{% endblock %}
