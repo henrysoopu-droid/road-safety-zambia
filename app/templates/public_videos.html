@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Public Road Videos · Road Safety Zambia{% endblock %}
+{% block content %}
+<section class="page-intro public-intro">
+    <p class="eyebrow">Public library</p>
+    <h1>Uploaded road videos</h1>
+    <p class="lede">Uploaded recordings are shown here for public review.</p>
+</section>
+
+<section class="panel manage-panel">
+    {% if videos %}
+        <div class="video-list">
+            {% for video in videos %}
+                <article class="video-item">
+                    <div>
+                        <h3>{{ video.title }}</h3>
+                        <p class="video-meta">{{ video.location or 'Road location not provided' }} · Uploaded {{ video.uploaded_at.strftime("%d %b %Y, %H:%M") }}</p>
+                        <p class="video-meta">Uploaded by: {{ video.uploader.username }}</p>
+                        {% if video.description %}<p>{{ video.description }}</p>{% endif %}
+                    </div>
+                    <div class="video-actions">
+                        <a class="btn btn-primary btn-compact" href="{{ url_for('main.public_video_watch', video_id=video.id) }}">Watch video</a>
+                    </div>
+                </article>
+            {% endfor %}
+        </div>
+    {% else %}
+        <p>No public road videos are available yet.</p>
+    {% endif %}
+</section>
+{% endblock %}

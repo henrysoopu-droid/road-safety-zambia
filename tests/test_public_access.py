@@ -16,11 +16,48 @@ class PublicAccessTests(unittest.TestCase):
         self.client = self.app.test_client()
 
     def test_public_pages_disable_coming_soon_placeholder(self):
+        home = self.client.get("/")
+        self.assertEqual(home.status_code, 200)
+        home_content = home.get_data(as_text=True)
+        self.assertNotIn("future sign-detection", home_content)
+        self.assertNotIn("placeholder for results", home_content)
+
         response = self.client.get("/signs")
         self.assertEqual(response.status_code, 200)
         self.assertNotIn("Coming Soon", response.get_data(as_text=True))
 
         response = self.client.get("/markings")
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("Coming Soon", response.get_data(as_text=True))
+
+    def test_logged_in_dashboard_displays_available_analysis_modules(self):
+        from app.extensions import db
+        from app.models import User
+
+        user = User(
+            username=f"dashboard-test-{id(self)}",
+            role="admin",
+            active=True,
+        )
+        user.set_password("test-password")
+        with self.app.app_context():
+            db.session.add(user)
+            db.session.commit()
+            user_id = user.id
+
+        def remove_test_user():
+            with self.app.app_context():
+                stored_user = db.session.get(User, user_id)
+                if stored_user is not None:
+                    db.session.delete(stored_user)
+                    db.session.commit()
+
+        self.addCleanup(remove_test_user)
+        with self.client.session_transaction() as session:
+            session["_user_id"] = str(user_id)
+            session["_fresh"] = True
+
+        response = self.client.get("/admin/dashboard")
         self.assertEqual(response.status_code, 200)
         self.assertNotIn("Coming Soon", response.get_data(as_text=True))
 

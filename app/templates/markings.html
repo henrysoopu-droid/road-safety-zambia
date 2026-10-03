@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}Road Markings · Road Safety Zambia{% endblock %}
+{% block content %}
+<section class="page-intro public-intro">
+    <p class="eyebrow">Public results</p>
+    <h1>Road Markings</h1>
+    <p class="lede">Detected road-surface markings from the current frame-analysis model.</p>
+</section>
+
+<section class="panel">
+    {% if summary %}
+        <div class="stats-grid">
+            {% for item in summary %}
+                <div class="stat-card">
+                    <h3>{{ item.label }}</h3>
+                    <p>{{ item.count }} detections</p>
+                    <p>Avg confidence: {{ "%.1f"|format(item.average_confidence * 100) }}%</p>
+                </div>
+            {% endfor %}
+        </div>
+    {% else %}
+        <p class="muted-ink">No marking detections have been recorded yet.</p>
+    {% endif %}
+</section>
+
+<section class="panel">
+    {% if detections %}
+        <div class="detection-list">
+            {% for detection in detections %}
+                <article class="detection-item">
+                    <div>
+                        <h3>{{ detection.class_name }}</h3>
+                        <p class="video-meta">Video #{{ detection.video_id }} · Frame {{ detection.frame_number }} · {{ "%.2f"|format(detection.timestamp_seconds) }}s</p>
+                        <p class="video-meta">Confidence: {{ "%.1f"|format(detection.confidence * 100) }}%</p>
+                    </div>
+                    {% if detection.annotated_filename %}
+                        <img class="detection-image" src="{{ url_for('main.public_marking_media', video_id=detection.video_id, filename=detection.annotated_filename) }}" alt="{{ detection.class_name }} marking" loading="lazy">
+                    {% endif %}
+                </article>
+            {% endfor %}
+        </div>
+    {% else %}
+        <p class="muted-ink">No road-marking analysis results are currently available.</p>
+    {% endif %}
+</section>
+{% endblock %}

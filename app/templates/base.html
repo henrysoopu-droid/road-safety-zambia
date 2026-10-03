@@ -3,8 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{% block title %}Road Safety in Zambia | Traffic Control Analysis System{% endblock %}</title>
-    <meta name="description" content="{% block meta_description %}Road Safety in Zambia: a traffic control analysis system for road signs, road markings, and road safety video research.{% endblock %}">
+    <title>{% block title %}{{ config['APP_NAME'] }} | Traffic Control Analysis System{% endblock %}</title>
+    <meta name="description" content="{% block meta_description %}{{ config['APP_NAME'] }}: a traffic control analysis system for road signs, road markings, and road safety video research.{% endblock %}">
     <meta name="robots" content="index, follow">
     <link rel="canonical" href="{{ config['SITE_URL'] }}{{ request.path }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
@@ -16,7 +16,7 @@
             <div class="brand">
                 <span class="brand-mark" aria-hidden="true"></span>
                 <div>
-                    <p class="brand-title">Road Safety in Zambia</p>
+                    <p class="brand-title">{{ config['APP_NAME'] }}</p>
                     <p class="brand-subtitle">Traffic Control Analysis System</p>
                 </div>
             </div>
@@ -38,9 +38,10 @@
         </header>
         {% else %}
         <header class="public-topbar">
-            <a class="public-brand" href="{{ url_for('main.index') }}">Road Safety in Zambia</a>
+            <a class="public-brand" href="{{ url_for('main.index') }}">{{ config['APP_NAME'] }}</a>
             <nav class="public-nav" aria-label="Public navigation">
                 <a href="{{ url_for('main.index') }}">Home</a>
+                <a href="{{ url_for('main.public_videos') }}">Road Videos</a>
                 <a href="{{ url_for('main.signs') }}">Road Signs</a>
                 <a href="{{ url_for('main.markings') }}">Road Markings</a>
                 <a href="{{ url_for('main.results') }}">Analysis Results</a>

@@ -1,17 +1,18 @@
 {% extends "base.html" %}
-{% block title %}Home · Road Safety in Zambia{% endblock %}
-{% block meta_description %}Road Safety in Zambia is a traffic control analysis system for public information about road signs, road markings, and road safety video research.{% endblock %}
+{% block title %}Home · Road Safety Zambia{% endblock %}
+{% block meta_description %}Road Safety Zambia is a traffic control analysis system for public information about road signs, road markings, and road safety video research.{% endblock %}
 {% block content %}
 <section class="public-hero">
     <p class="eyebrow">National road-safety foundation</p>
-    <h1>Road Safety in Zambia</h1>
+    <h1>Road Safety Zambia</h1>
     <p class="hero-lede">Traffic Control Analysis System</p>
     <p class="hero-copy">A structured platform for reviewing road signs, road markings, and road footage as the project develops.</p>
     <a class="btn btn-primary btn-compact" href="{{ url_for('main.signs') }}">Explore the public modules</a>
 </section>
 <section class="public-grid">
-    <a class="public-feature" href="{{ url_for('main.signs') }}"><span>01</span><h2>Road Signs</h2><p>Information about the future sign-detection and classification workflow.</p></a>
-    <a class="public-feature" href="{{ url_for('main.markings') }}"><span>02</span><h2>Road Markings</h2><p>Information about planned marking analysis and condition assessment.</p></a>
-    <a class="public-feature" href="{{ url_for('main.results') }}"><span>03</span><h2>Analysis Results</h2><p>A placeholder for results when analysis capabilities are introduced.</p></a>
+    <a class="public-feature" href="{{ url_for('main.public_videos') }}"><span>01</span><h2>Road Videos</h2><p>Browse uploaded road footage from the active project library.</p></a>
+    <a class="public-feature" href="{{ url_for('main.signs') }}"><span>02</span><h2>Road Signs</h2><p>Review recorded sign detections stored in the analysis database.</p></a>
+    <a class="public-feature" href="{{ url_for('main.markings') }}"><span>03</span><h2>Road Markings</h2><p>Inspect supported road-surface marking findings and associated video frames.</p></a>
+    <a class="public-feature" href="{{ url_for('main.results') }}"><span>04</span><h2>Analysis Results</h2><p>See summary counts, classes, and confidence information for reviewed footage.</p></a>
 </section>
 {% endblock %}

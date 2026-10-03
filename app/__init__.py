@@ -152,6 +152,7 @@ def create_app():
     model_folder = Path(os.getenv("MODEL_DIR", Path(app.instance_path) / "models"))
     model_folder.mkdir(parents=True, exist_ok=True)
 
+    app.config["APP_NAME"] = "Road Safety Zambia"
     app.config["SECRET_KEY"] = secret_key
     app.config["SITE_URL"] = os.getenv("SITE_URL", "http://127.0.0.1:5000").rstrip("/")
     app.config["DEBUG"] = debug

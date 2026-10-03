@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}Analysis Results · Road Safety Zambia{% endblock %}
+{% block content %}
+<section class="page-intro public-intro">
+    <p class="eyebrow">Public results</p>
+    <h1>Analysis Results</h1>
+    <p class="lede">Summary of videos, traffic-sign detections, and road-marking findings captured by the analysis workflow.</p>
+</section>
+
+<section class="panel">
+    <div class="stats-grid">
+        <div class="stat-card">
+            <h3>Videos analysed</h3>
+            <p>{{ total_videos }}</p>
+        </div>
+        <div class="stat-card">
+            <h3>Traffic-sign detections</h3>
+            <p>{{ traffic_sign_total }}</p>
+        </div>
+        <div class="stat-card">
+            <h3>Road-marking detections</h3>
+            <p>{{ road_marking_total }}</p>
+        </div>
+    </div>
+</section>
+
+<section class="panel">
+    <h2>Detected classes</h2>
+    <ul class="planned-list">
+        {% for item in sign_classes %}
+            <li>Traffic sign: {{ item[0] }}</li>
+        {% endfor %}
+        {% for item in marking_classes %}
+            <li>Road marking: {{ item[0] }}</li>
+        {% endfor %}
+    </ul>
+</section>
+
+<section class="panel">
+    <h2>Video list</h2>
+    {% if videos %}
+        <div class="video-list">
+            {% for video in videos %}
+                <article class="video-item">
+                    <div>
+                        <h3>{{ video.title }}</h3>
+                        <p class="video-meta">{{ video.location or 'Road location not provided' }} · Uploaded {{ video.uploaded_at.strftime("%d %b %Y, %H:%M") }}</p>
+                        <p class="video-meta">Status: {{ video.processing_status or 'uploaded' }} · Analysis: {{ video.analysis_status or 'not_started' }}</p>
+                    </div>
+                    <div class="video-actions">
+                        <a class="btn btn-secondary btn-compact" href="{{ url_for('main.public_video_watch', video_id=video.id) }}">View results</a>
+                    </div>
+                </article>
+            {% endfor %}
+        </div>
+    {% else %}
+        <p class="muted-ink">No uploaded videos are available yet.</p>
+    {% endif %}
+</section>
+{% endblock %}

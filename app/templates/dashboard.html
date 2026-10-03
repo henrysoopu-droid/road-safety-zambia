@@ -1,37 +1,62 @@
 {% extends "base.html" %}
-{% block title %}Dashboard · Road Safety in Zambia{% endblock %}
+{% block title %}Dashboard · Road Safety Zambia{% endblock %}
 {% block content %}
 <section class="page-intro">
     <p class="eyebrow">{{ dashboard_role }} Dashboard</p>
-    <h1>Road Safety in Zambia</h1>
+    <h1>Road Safety Zambia</h1>
     <p class="lede">Traffic Control Analysis System</p>
     <p>Signed in as <strong>{{ current_user.username }}</strong> · Role: <strong>{{ current_user.role|capitalize }}</strong></p>
+</section>
+
+<section class="panel dashboard-videos" aria-labelledby="dashboard-videos-title">
+    <div class="video-library-heading">
+        <div>
+            <p class="card-kicker">Video library · {{ video_count }} uploaded</p>
+            <h2 id="dashboard-videos-title">Road Videos</h2>
+        </div>
+        <a class="btn btn-primary btn-compact" href="{{ url_for('videos.library') }}">Open video library</a>
+    </div>
+    {% if recent_videos %}
+        <div class="video-list">
+            {% for video in recent_videos %}
+                <article class="video-item">
+                    <div>
+                        <h3>{{ video.title }}</h3>
+                        <p class="video-meta">{{ video.location }} · Uploaded {{ video.uploaded_at.strftime("%d %b %Y") }}</p>
+                    </div>
+                    <a class="btn btn-secondary btn-compact" href="{{ url_for('videos.watch', video_id=video.id) }}">View video</a>
+                </article>
+            {% endfor %}
+        </div>
+    {% else %}
+        <p>No road videos have been uploaded yet.</p>
+    {% endif %}
 </section>
 
 <section class="card-grid">
     <a class="card" href="{{ url_for('videos.library') }}" data-module="videos">
         <p class="card-kicker">Module</p>
         <h2>Road Videos</h2>
-        <p>Upload and organise recorded road footage for later analysis.</p>
+        <p>Upload, review, and manage recorded road footage.</p>
         <span class="badge">Available</span>
     </a>
     <a class="card" href="{{ url_for('main.signs') }}" data-module="signs">
         <p class="card-kicker">Module</p>
         <h2>Road Signs</h2>
-        <p>Detect, classify, and store traffic signs from road footage.</p>
-        <span class="badge">Coming Soon</span>
+        <p>View live sign-detection records stored from the uploaded video analysis.</p>
+        <span class="badge">Live data</span>
     </a>
     <a class="card" href="{{ url_for('main.markings') }}" data-module="markings">
         <p class="card-kicker">Module</p>
         <h2>Road Markings</h2>
-        <p>View, analyse, and assess the condition of road markings.</p>
-        <span class="badge">Coming Soon</span>
+        <p>Review detected lane, crossing, and surface-marking results based on the configured model.</p>
+        <span class="badge">Live data</span>
     </a>
     <a class="card" href="{{ url_for('main.results') }}" data-module="results">
         <p class="card-kicker">Module</p>
         <h2>Analysis Results</h2>
-        <p>Review detected signs, markings, condition, and frame-level findings.</p>
-        <span class="badge">Coming Soon</span>
+        <p>Summarise uploaded videos, detections, confidence scores, and available road footage.</p>
+        <span class="badge">Live data</span>
     </a>
     {% if current_user.is_admin() %}
     <a class="card" href="{{ url_for('auth.users') }}">
