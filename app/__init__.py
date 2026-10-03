@@ -3,7 +3,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from flask import Flask, flash, redirect, request, url_for
-from sqlalchemy import inspect, text
+from sqlalchemy import MetaData, inspect, text
+from sqlalchemy.schema import CreateTable
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from app.extensions import csrf, db, login_manager
@@ -34,6 +35,70 @@ def sqlite_uri(instance_path, database_url):
     return "sqlite:///" + db_path.as_posix()
 
 
+def remove_detection_filename_uniqueness():
+    inspector = inspect(db.engine)
+    dialect = db.engine.dialect
+    preparer = dialect.identifier_preparer
+    table_names = ("traffic_sign_detections", "road_marking_detections")
+
+    for table_name in table_names:
+        if table_name not in inspector.get_table_names():
+            continue
+        unique_constraints = [
+            constraint
+            for constraint in inspector.get_unique_constraints(table_name)
+            if constraint.get("column_names") == ["annotated_filename"]
+        ]
+        if not unique_constraints:
+            continue
+
+        quoted_table = preparer.quote(table_name)
+        if dialect.name == "sqlite":
+            source_table = db.metadata.tables[table_name]
+            replacement_name = f"{table_name}_replacement"
+            replacement_metadata = MetaData()
+            for referenced_table in ("videos", "frames"):
+                db.metadata.tables[referenced_table].to_metadata(
+                    replacement_metadata
+                )
+            replacement_table = source_table.to_metadata(
+                replacement_metadata, name=replacement_name
+            )
+            quoted_replacement = preparer.quote(replacement_name)
+            quoted_columns = ", ".join(
+                preparer.quote(column.name) for column in source_table.columns
+            )
+            with db.engine.begin() as connection:
+                connection.execute(CreateTable(replacement_table))
+                connection.execute(
+                    text(
+                        f"INSERT INTO {quoted_replacement} ({quoted_columns}) "
+                        f"SELECT {quoted_columns} FROM {quoted_table}"
+                    )
+                )
+                connection.execute(text(f"DROP TABLE {quoted_table}"))
+                connection.execute(
+                    text(
+                        f"ALTER TABLE {quoted_replacement} "
+                        f"RENAME TO {quoted_table}"
+                    )
+                )
+                for index in source_table.indexes:
+                    index.create(connection, checkfirst=True)
+        elif dialect.name == "postgresql":
+            with db.engine.begin() as connection:
+                for constraint in unique_constraints:
+                    name = constraint.get("name")
+                    if name:
+                        quoted_constraint = preparer.quote(name)
+                        connection.execute(
+                            text(
+                                f"ALTER TABLE {quoted_table} DROP CONSTRAINT "
+                                f"{quoted_constraint}"
+                            )
+                        )
+
+
 def ensure_database_schema(app):
     with app.app_context():
         db.create_all()
@@ -49,6 +114,7 @@ def ensure_database_schema(app):
                     db.session.execute(text(f"ALTER TABLE videos ADD COLUMN {column_name} {column_definition}"))
         if "road_marking_detections" not in inspector.get_table_names():
             db.create_all()
+        remove_detection_filename_uniqueness()
         db.session.commit()
 
 
