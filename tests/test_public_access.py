@@ -32,6 +32,15 @@ class PublicAccessTests(unittest.TestCase):
         response = self.client.get("/public/videos")
         self.assertEqual(response.status_code, 200)
 
+    def test_detection_models_are_importable(self):
+        from app.models import RoadMarkingDetection, TrafficSignDetection, Video
+
+        self.assertIsNotNone(RoadMarkingDetection)
+        self.assertIsNotNone(TrafficSignDetection)
+        self.assertIsNotNone(Video)
+        self.assertEqual(RoadMarkingDetection.__tablename__, "road_marking_detections")
+        self.assertEqual(TrafficSignDetection.__tablename__, "traffic_sign_detections")
+
     def test_relative_sqlite_database_uri_resolves_inside_instance_dir(self):
         instance_dir = "/tmp/road_safety_instance"
         db_uri = sqlite_uri(instance_dir, "sqlite:///instance/road_safety.db")
