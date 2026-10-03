@@ -3,6 +3,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from flask import Flask, flash, redirect, request, url_for
+from sqlalchemy import inspect, text
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from app.extensions import csrf, db, login_manager
@@ -14,11 +15,41 @@ load_dotenv(BASE_DIR / ".env")
 def sqlite_uri(instance_path, database_url):
     if not database_url.startswith("sqlite:///"):
         return database_url
+
     db_name = database_url.replace("sqlite:///", "", 1)
+    if not db_name:
+        db_path = Path(instance_path) / "app.db"
+        return "sqlite:///" + db_path.resolve().as_posix()
+
     db_path = Path(db_name)
-    if not db_path.is_absolute():
-        db_path = Path(instance_path) / db_path
-    return "sqlite:///" + db_path.resolve().as_posix()
+    if db_path.is_absolute():
+        return "sqlite:///" + db_path.resolve().as_posix()
+
+    instance_dir = Path(instance_path).resolve()
+    if db_name.startswith("instance/"):
+        db_path = (instance_dir.parent / db_name).resolve()
+    else:
+        db_path = (instance_dir / db_name).resolve()
+
+    return "sqlite:///" + db_path.as_posix()
+
+
+def ensure_database_schema(app):
+    with app.app_context():
+        db.create_all()
+        inspector = inspect(db.engine)
+        if "videos" in inspector.get_table_names():
+            video_columns = {column["name"] for column in inspector.get_columns("videos")}
+            for column_name, column_definition in {
+                "processing_status": "VARCHAR(30) NOT NULL DEFAULT 'uploaded'",
+                "analysis_status": "VARCHAR(30) NOT NULL DEFAULT 'not_started'",
+                "annotated_video_filename": "VARCHAR(255)",
+            }.items():
+                if column_name not in video_columns:
+                    db.session.execute(text(f"ALTER TABLE videos ADD COLUMN {column_name} {column_definition}"))
+        if "road_marking_detections" not in inspector.get_table_names():
+            db.create_all()
+        db.session.commit()
 
 
 def create_app():
@@ -38,7 +69,7 @@ def create_app():
     max_upload_mb = int(os.getenv("MAX_UPLOAD_MB", "500"))
     max_extracted_frames = int(os.getenv("MAX_EXTRACTED_FRAMES", "5000"))
 
-    database_url = os.getenv("DATABASE_URL", "sqlite:///road_safety.db")
+    database_url = os.getenv("DATABASE_URL", "sqlite:///instance/road_safety.db")
     if database_url.startswith("postgres://"):
         database_url = "postgresql+psycopg://" + database_url[len("postgres://") :]
     elif database_url.startswith("postgresql://"):
@@ -71,9 +102,51 @@ def create_app():
     app.config["VIDEO_UPLOAD_FOLDER"] = str(video_upload_folder)
     app.config["FRAME_UPLOAD_FOLDER"] = str(frame_upload_folder)
     app.config["DETECTION_UPLOAD_FOLDER"] = str(detection_upload_folder)
-    app.config["TRAFFIC_SIGN_MODEL"] = str(
-        model_folder / os.getenv("TRAFFIC_SIGN_MODEL", "yolov5s.onnx")
+    app.config["MODEL_DIR"] = str(model_folder)
+    app.config["TRAFFIC_SIGN_MODEL_PATH"] = str(
+        model_folder / "traffic_signs" / os.getenv("TRAFFIC_SIGN_MODEL", "yolov8s-best.pt")
     )
+    app.config["SPEED_HUMP_MODEL_PATH"] = str(
+        model_folder / "speed_humps" / os.getenv("SPEED_HUMP_MODEL", "speed_hump_model.pt")
+    )
+    app.config["TRAFFIC_SIGN_CONFIDENCE"] = float(os.getenv("TRAFFIC_SIGN_CONFIDENCE", "0.40"))
+    app.config["SPEED_HUMP_CONFIDENCE"] = float(os.getenv("SPEED_HUMP_CONFIDENCE", "0.40"))
+    app.config["MODEL_CONFIG"] = {
+        "traffic_sign": {
+            "name": os.getenv("TRAFFIC_SIGN_MODEL", "yolov8s-best.pt"),
+            "format": "YOLOv8 PT weights",
+            "inference": "Ultralytics YOLO",
+            "classes": [
+                "Stop",
+                "Red Light",
+                "Green Light",
+                "Speed Limit 10",
+                "Speed Limit 100",
+                "Speed Limit 110",
+                "Speed Limit 120",
+                "Speed Limit 20",
+                "Speed Limit 30",
+                "Speed Limit 40",
+                "Speed Limit 50",
+                "Speed Limit 60",
+                "Speed Limit 70",
+                "Speed Limit 80",
+                "Speed Limit 90",
+            ],
+        },
+        "speed_hump": {
+            "name": os.getenv("SPEED_HUMP_MODEL", "speed_hump_model.pt"),
+            "format": "YOLO weights when available",
+            "inference": "Ultralytics YOLO",
+            "classes": ["Speed Hump", "Speed Bump"],
+        },
+        "road_marking": {
+            "name": os.getenv("ROAD_MARKING_MODEL", "road_marking_model.onnx"),
+            "format": "OpenCV/vision pipeline when available",
+            "inference": "OpenCV image processing",
+            "classes": ["lane marking", "zebra crossing", "arrow marking"],
+        },
+    }
     app.config["MAX_EXTRACTED_FRAMES"] = max_extracted_frames
     app.config["MAX_CONTENT_LENGTH"] = max_upload_mb * 1024 * 1024
     app.config["MAX_UPLOAD_MB"] = max_upload_mb
@@ -113,7 +186,5 @@ def create_app():
     app.register_blueprint(main_bp)
     app.register_blueprint(videos_bp)
 
-    with app.app_context():
-        db.create_all()
-
+    ensure_database_schema(app)
     return app

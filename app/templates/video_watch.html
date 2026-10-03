@@ -9,15 +9,26 @@
 </section>
 
 <section class="panel manage-panel">
+    <div class="video-switcher">
+        <a class="btn btn-primary btn-compact" href="{{ url_for('videos.media', video_id=video.id) }}" target="_blank" rel="noopener">▶ Play Original Video</a>
+        {% if video.annotated_video_filename %}
+            <a class="btn btn-secondary btn-compact" href="{{ url_for('videos.annotated_media', video_id=video.id) }}" target="_blank" rel="noopener">▶ Play Analysed Video</a>
+        {% endif %}
+    </div>
     <video class="video-player" controls preload="metadata">
         <source src="{{ url_for('videos.media', video_id=video.id) }}" type="{{ media_type }}">
         Your browser does not support embedded video playback.
     </video>
     <p class="video-meta">Original file: {{ video.original_filename }}</p>
+    <p class="video-meta">Status: {{ video.processing_status or 'uploaded' }} · Analysis: {{ video.analysis_status or 'not_started' }}</p>
     {% if video.description %}
         <p>{{ video.description }}</p>
     {% endif %}
-    <p class="muted-ink">This video is stored for later frame extraction and traffic-control analysis. Detection is not run in this module.</p>
+    {% if video.annotated_video_filename %}
+        <p class="muted-ink">Analysed video is available and contains bounding boxes and labels for supported detections.</p>
+    {% else %}
+        <p class="muted-ink">No analysed video is available yet. Run analysis to generate a processed playback version.</p>
+    {% endif %}
     <section class="frame-tools">
         <h2>Frame extraction</h2>
         <p>Extract one frame at a controlled interval for later analysis. Existing extracted frames will be replaced.</p>
@@ -31,7 +42,7 @@
     </section>
     <section class="frame-tools detection-tools">
         <h2>Traffic-sign detection</h2>
-        <p>Run the pretrained detector on the extracted frames only. Detection does not run during upload or frame extraction.</p>
+        <p>Run the pretrained detector on the extracted frames and generate the analysed playback overlay.</p>
         <form method="post" action="{{ url_for('videos.detect_signs', video_id=video.id) }}">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <button type="submit" class="btn btn-secondary btn-compact">Detect Traffic Signs</button>
@@ -54,6 +65,34 @@
             </div>
         {% else %}
             <p class="muted-ink">No traffic-sign detections stored yet.</p>
+        {% endif %}
+    </section>
+
+    <section class="frame-tools detection-tools">
+        <h2>Road-marking detection</h2>
+        <p>Run the road-marking analysis and overlay supported markings directly onto the processed playback.</p>
+        <form method="post" action="{{ url_for('videos.detect_markings', video_id=video.id) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="btn btn-secondary btn-compact">Detect Road Markings</button>
+        </form>
+        {% if road_markings %}
+            <p class="detection-summary">{{ road_markings|length }} marking detection(s) stored.</p>
+            <div class="detection-list">
+                {% for detection in road_markings %}
+                    <article class="detection-item">
+                        <div>
+                            <h3>{{ detection.class_name }}</h3>
+                            <p class="video-meta">Confidence: {{ "%.1f"|format(detection.confidence * 100) }}% · Frame {{ detection.frame_number }} · {{ "%.2f"|format(detection.timestamp_seconds) }}s</p>
+                            <p class="video-meta">Box: {{ "%.0f"|format(detection.x_min) }}, {{ "%.0f"|format(detection.y_min) }} to {{ "%.0f"|format(detection.x_max) }}, {{ "%.0f"|format(detection.y_max) }}</p>
+                        </div>
+                        {% if detection.annotated_filename %}
+                            <img class="detection-image" src="{{ url_for('videos.marking_media', video_id=video.id, filename=detection.annotated_filename) }}" alt="{{ detection.class_name }} marking detection at frame {{ detection.frame_number }}" loading="lazy">
+                        {% endif %}
+                    </article>
+                {% endfor %}
+            </div>
+        {% else %}
+            <p class="muted-ink">No road-marking detections stored yet.</p>
         {% endif %}
     </section>
     <section id="frames" class="frame-gallery">

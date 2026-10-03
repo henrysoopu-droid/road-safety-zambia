@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}{{ video.title }} · Road Safety Zambia{% endblock %}
+{% block content %}
+<section class="page-intro">
+    <p class="eyebrow">Public video</p>
+    <h1>{{ video.title }}</h1>
+    <p class="lede">{{ video.location or 'Road location not provided' }}</p>
+    <p>Uploaded by {{ video.uploader.username }} on {{ video.uploaded_at.strftime("%d %b %Y, %H:%M") }}</p>
+</section>
+
+<section class="panel manage-panel">
+    <div class="video-switcher">
+        <a class="btn btn-primary btn-compact" href="{{ url_for('main.public_video_file', video_id=video.id) }}" target="_blank" rel="noopener">▶ Play Original Video</a>
+        {% if video.annotated_video_filename %}
+            <a class="btn btn-secondary btn-compact" href="{{ url_for('main.public_annotated_video', video_id=video.id) }}" target="_blank" rel="noopener">▶ Play Analysed Video</a>
+        {% endif %}
+    </div>
+    <video class="video-player" controls preload="metadata">
+        <source src="{{ url_for('main.public_video_file', video_id=video.id) }}" type="video/mp4">
+        Your browser does not support embedded video playback.
+    </video>
+    {% if video.description %}<p>{{ video.description }}</p>{% endif %}
+    <p class="video-meta">Status: {{ video.processing_status or 'uploaded' }} · Analysis: {{ video.analysis_status or 'not_started' }}</p>
+    <p class="muted-ink">This public page is read-only. Use the login pages for upload, analysis, and admin actions.</p>
+</section>
+
+<section class="panel">
+    <h2>Detected traffic signs</h2>
+    {% if detections %}
+        <div class="detection-list">
+            {% for detection in detections %}
+                <article class="detection-item">
+                    <div>
+                        <h3>{{ detection.class_name }}</h3>
+                        <p class="video-meta">Confidence: {{ "%.1f"|format(detection.confidence * 100) }}% · Frame {{ detection.frame_number }} · {{ "%.2f"|format(detection.timestamp_seconds) }}s</p>
+                    </div>
+                    {% if detection.annotated_filename %}
+                        <img class="detection-image" src="{{ url_for('main.public_detection_media', video_id=video.id, filename=detection.annotated_filename) }}" alt="{{ detection.class_name }} detection" loading="lazy">
+                    {% endif %}
+                </article>
+            {% endfor %}
+        </div>
+    {% else %}
+        <p class="muted-ink">No published traffic-sign detections are available for this video yet.</p>
+    {% endif %}
+</section>
+
+<section class="panel">
+    <h2>Detected road markings</h2>
+    {% if markings %}
+        <div class="detection-list">
+            {% for detection in markings %}
+                <article class="detection-item">
+                    <div>
+                        <h3>{{ detection.class_name }}</h3>
+                        <p class="video-meta">Confidence: {{ "%.1f"|format(detection.confidence * 100) }}% · Frame {{ detection.frame_number }} · {{ "%.2f"|format(detection.timestamp_seconds) }}s</p>
+                    </div>
+                    {% if detection.annotated_filename %}
+                        <img class="detection-image" src="{{ url_for('main.public_marking_media', video_id=video.id, filename=detection.annotated_filename) }}" alt="{{ detection.class_name }} marking" loading="lazy">
+                    {% endif %}
+                </article>
+            {% endfor %}
+        </div>
+    {% else %}
+        <p class="muted-ink">No published road-marking detections are available for this video yet.</p>
+    {% endif %}
+</section>
+{% endblock %}

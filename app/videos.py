@@ -16,9 +16,10 @@ from flask import (
 from flask_login import current_user, login_required
 from werkzeug.utils import secure_filename
 
+from app.detectors import SpeedHumpDetector, TrafficSignDetector
 from app.extensions import db
 from app.forms import ALLOWED_VIDEO_EXTENSIONS, FrameExtractionForm, VideoUploadForm
-from app.models import Frame, TrafficSignDetection, Video
+from app.models import Frame, RoadMarkingDetection, TrafficSignDetection, Video
 
 videos_bp = Blueprint("videos", __name__)
 _EXTRACTION_LOCKS = {}
@@ -68,6 +69,10 @@ def detection_folder():
     return folder
 
 
+def annotated_video_name(video_id):
+    return f"video_{video_id}_analysed.mp4"
+
+
 def frame_name(video_id, frame_number):
     return f"video_{video_id}_{frame_number}_{uuid4().hex}.jpg"
 
@@ -91,73 +96,33 @@ def detection_lock(video_id):
 
 
 def traffic_sign_model():
-    try:
-        import cv2
-    except ImportError as error:
-        raise RuntimeError("OpenCV is not installed. Run pip install -r requirements.txt.") from error
-
-    model_path = Path(current_app.config["TRAFFIC_SIGN_MODEL"])
-    if not model_path.is_file():
-        raise RuntimeError(
-            "Traffic-sign model weights are missing. Add yolov5s.onnx to the instance/models directory."
-        )
-    return cv2.dnn.readNetFromONNX(str(model_path))
-
-
-def predict_stop_signs(model, image):
-    import cv2
-    import numpy as np
-
-    image_height, image_width = image.shape[:2]
-    blob = cv2.dnn.blobFromImage(
-        image, scalefactor=1 / 255.0, size=(640, 640), swapRB=True, crop=False
+    return TrafficSignDetector(
+        model_path=current_app.config.get("TRAFFIC_SIGN_MODEL_PATH"),
+        threshold=current_app.config.get("TRAFFIC_SIGN_CONFIDENCE", 0.40),
     )
-    model.setInput(blob)
-    output = model.forward()
-    predictions = output[0].T if output.ndim == 3 else output
-    if predictions.shape[0] < predictions.shape[1]:
-        predictions = predictions.T
 
-    boxes = []
-    confidences = []
-    for prediction in predictions:
-        objectness = float(prediction[4])
-        class_scores = prediction[5:]
-        class_id = int(np.argmax(class_scores))
-        confidence = objectness * float(class_scores[class_id])
-        if class_id != TRAFFIC_SIGN_CLASS_ID or confidence < 0.25:
-            continue
-        center_x, center_y, width, height = prediction[:4]
-        left = int((center_x - width / 2) * image_width / 640)
-        top = int((center_y - height / 2) * image_height / 640)
-        box_width = int(width * image_width / 640)
-        box_height = int(height * image_height / 640)
-        boxes.append([left, top, box_width, box_height])
-        confidences.append(confidence)
 
-    selected = cv2.dnn.NMSBoxes(boxes, confidences, 0.25, 0.45)
-    detections = []
-    for index in selected:
-        index = int(index)
-        left, top, width, height = boxes[index]
-        detections.append(
-            {
-                "class_name": TRAFFIC_SIGN_CLASS_NAME,
-                "confidence": confidences[index],
-                "x_min": max(0, left),
-                "y_min": max(0, top),
-                "x_max": min(image_width, left + width),
-                "y_max": min(image_height, top + height),
-            }
-        )
-    return detections
+def speed_hump_model():
+    return SpeedHumpDetector(
+        model_path=current_app.config.get("SPEED_HUMP_MODEL_PATH"),
+        threshold=current_app.config.get("SPEED_HUMP_CONFIDENCE", 0.40),
+    )
+
+
+def predict_traffic_signs(image):
+    detector = traffic_sign_model()
+    return detector.predict(image)
 
 
 def detect_traffic_signs(video):
-    model = traffic_sign_model()
+    detector = traffic_sign_model()
     frames = list(video.frames)
     if not frames:
         raise RuntimeError("Extract frames before detecting traffic signs.")
+    if not detector.is_available():
+        raise RuntimeError(
+            "Traffic-sign model not found. Place the YOLOv8 weights in instance/models/traffic_signs/yolov8s-best.pt or update TRAFFIC_SIGN_MODEL_PATH."
+        )
 
     old_detections = TrafficSignDetection.query.filter_by(video_id=video.id).all()
     old_annotated = [d.annotated_filename for d in old_detections if d.annotated_filename]
@@ -182,10 +147,10 @@ def detect_traffic_signs(video):
             image = cv2.imread(str(frame_path))
             if image is None:
                 continue
-            detections = predict_stop_signs(model, image)
+            detections = detector.predict(image)
             if not detections:
                 continue
-            annotated_filename = f"video_{video.id}_frame_{frame.id}_{uuid4().hex}.jpg"
+            annotated_filename = f"traffic_{video.id}_frame_{frame.id}_{uuid4().hex}.jpg"
             annotated_path = detection_folder() / annotated_filename
             annotated = image.copy()
             for detection in detections:
@@ -206,7 +171,7 @@ def detect_traffic_signs(video):
                     2,
                 )
             if not cv2.imwrite(str(annotated_path), annotated):
-                raise RuntimeError("The annotated detection image could not be saved.")
+                raise RuntimeError("The annotated traffic-sign image could not be saved.")
             created_files.append(annotated_path)
             for detection in detections:
                 db.session.add(
@@ -234,6 +199,201 @@ def detect_traffic_signs(video):
         db.session.rollback()
         raise
     return detection_count, len(frames)
+
+
+def predict_road_markings(image):
+    import cv2
+    import numpy as np
+
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    white_mask = cv2.inRange(hsv, (0, 0, 180), (180, 80, 255))
+    yellow_mask = cv2.inRange(hsv, (15, 80, 80), (45, 255, 255))
+    mask = cv2.bitwise_or(white_mask, yellow_mask)
+    kernel = np.ones((5, 5), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    detections = []
+    for contour in contours:
+        area = cv2.contourArea(contour)
+        if area < 250:
+            continue
+        x, y, w, h = cv2.boundingRect(contour)
+        if w <= 0 or h <= 0:
+            continue
+        ratio = w / max(h, 1)
+        if ratio >= 2.5:
+            class_name = "lane marking"
+        elif w > 40 and h > 25:
+            class_name = "zebra crossing"
+        else:
+            class_name = "arrow marking"
+
+        confidence = min(0.99, max(0.35, area / 8000.0))
+        detections.append(
+            {
+                "class_name": class_name,
+                "confidence": float(confidence),
+                "x_min": max(0, x),
+                "y_min": max(0, y),
+                "x_max": min(image.shape[1], x + w),
+                "y_max": min(image.shape[0], y + h),
+            }
+        )
+    return detections
+
+
+def detect_road_markings(video):
+    frames = list(video.frames)
+    if not frames:
+        raise RuntimeError("Extract frames before detecting road markings.")
+
+    old_detections = RoadMarkingDetection.query.filter_by(video_id=video.id).all()
+    old_annotated = [d.annotated_filename for d in old_detections if d.annotated_filename]
+    db.session.query(RoadMarkingDetection).filter_by(video_id=video.id).delete(
+        synchronize_session=False
+    )
+    db.session.flush()
+    for filename in old_annotated:
+        path = detection_folder() / filename
+        if path.is_file():
+            path.unlink()
+
+    detection_count = 0
+    created_files = []
+    try:
+        for frame in frames:
+            frame_path = frame_folder() / frame.filename
+            if not frame_path.is_file():
+                continue
+            import cv2
+
+            image = cv2.imread(str(frame_path))
+            if image is None:
+                continue
+            detections = predict_road_markings(image)
+            if not detections:
+                continue
+            annotated_filename = f"markings_{video.id}_frame_{frame.id}_{uuid4().hex}.jpg"
+            annotated_path = detection_folder() / annotated_filename
+            annotated = image.copy()
+            for detection in detections:
+                cv2.rectangle(
+                    annotated,
+                    (int(detection["x_min"]), int(detection["y_min"])),
+                    (int(detection["x_max"]), int(detection["y_max"])),
+                    (0, 165, 255),
+                    2,
+                )
+                cv2.putText(
+                    annotated,
+                    f"{detection['class_name']} {detection['confidence']:.2f}",
+                    (int(detection["x_min"]), max(20, int(detection["y_min"]) - 8)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.55,
+                    (0, 165, 255),
+                    2,
+                )
+            if not cv2.imwrite(str(annotated_path), annotated):
+                raise RuntimeError("The annotated road-marking image could not be saved.")
+            created_files.append(annotated_path)
+            for detection in detections:
+                db.session.add(
+                    RoadMarkingDetection(
+                        video_id=video.id,
+                        frame_id=frame.id,
+                        class_name=detection["class_name"],
+                        confidence=detection["confidence"],
+                        frame_number=frame.frame_number,
+                        timestamp_seconds=frame.timestamp_seconds,
+                        frame_filename=frame.filename,
+                        annotated_filename=annotated_filename,
+                        x_min=detection["x_min"],
+                        y_min=detection["y_min"],
+                        x_max=detection["x_max"],
+                        y_max=detection["y_max"],
+                    )
+                )
+                detection_count += 1
+        db.session.commit()
+    except Exception:
+        for path in created_files:
+            if path.is_file():
+                path.unlink()
+        db.session.rollback()
+        raise
+    return detection_count, len(frames)
+
+
+def generate_annotated_video(video):
+    try:
+        import cv2
+    except ImportError as error:
+        raise RuntimeError("OpenCV is not installed. Run pip install -r requirements.txt.") from error
+
+    if not video.frames:
+        raise RuntimeError("Extract frames before generating an analysed video.")
+
+    output_name = annotated_video_name(video.id)
+    output_path = detection_folder() / output_name
+    if output_path.exists():
+        output_path.unlink()
+
+    frame_paths = [frame_folder() / frame.filename for frame in video.frames if (frame_folder() / frame.filename).is_file()]
+    if not frame_paths:
+        raise RuntimeError("No frames are available to create an analysed video.")
+
+    first_image = cv2.imread(str(frame_paths[0]))
+    if first_image is None:
+        raise RuntimeError("The first extracted frame could not be read.")
+
+    height, width = first_image.shape[:2]
+    fps = 25.0
+    if video.frames:
+        frame_interval = max(video.frames[0].timestamp_seconds, 0.1)
+        fps = max(1.0, 1.0 / frame_interval)
+
+    writer = cv2.VideoWriter(str(output_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
+    if not writer.isOpened():
+        raise RuntimeError("OpenCV could not create the annotated output video.")
+
+    try:
+        for frame in video.frames:
+            image_path = frame_folder() / frame.filename
+            image = cv2.imread(str(image_path))
+            if image is None:
+                continue
+            detections = list(
+                TrafficSignDetection.query.filter_by(frame_id=frame.id).order_by(TrafficSignDetection.confidence.desc()).all()
+            )
+            detections.extend(
+                RoadMarkingDetection.query.filter_by(frame_id=frame.id).order_by(RoadMarkingDetection.confidence.desc()).all()
+            )
+            for detection in detections:
+                label = (detection.class_name or "object").upper()
+                confidence = float(detection.confidence or 0.0)
+                left = max(0, int(getattr(detection, "x_min", 0) or 0))
+                top = max(0, int(getattr(detection, "y_min", 0) or 0))
+                right = min(image.shape[1], int(getattr(detection, "x_max", image.shape[1]) or image.shape[1]))
+                bottom = min(image.shape[0], int(getattr(detection, "y_max", image.shape[0]) or image.shape[0]))
+                color = (0, 200, 0) if isinstance(detection, TrafficSignDetection) else (0, 165, 255)
+                cv2.rectangle(image, (left, top), (right, bottom), color, 2)
+                cv2.putText(
+                    image,
+                    f"{label} {confidence:.2f}",
+                    (left, max(20, top - 8)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    color,
+                    2,
+                )
+            writer.write(image)
+    finally:
+        writer.release()
+
+    video.annotated_video_filename = output_name
+    db.session.commit()
+    return output_name
 
 
 def extract_video_frames(video, interval_seconds):
@@ -327,9 +487,11 @@ def library():
                 title=form.title.data.strip(),
                 filename=filename,
                 original_filename=original_name,
-                location=form.location.data.strip(),
+                location=(form.location.data or "").strip() or "Road location not provided",
                 description=(form.description.data or "").strip() or None,
                 uploaded_by=current_user.id,
+                processing_status="uploaded",
+                analysis_status="not_started",
             )
             db.session.add(video)
             db.session.commit()
@@ -368,11 +530,28 @@ def watch(video_id):
         detections=TrafficSignDetection.query.filter_by(video_id=video.id)
         .order_by(TrafficSignDetection.confidence.desc())
         .all(),
+        road_markings=RoadMarkingDetection.query.filter_by(video_id=video.id)
+        .order_by(RoadMarkingDetection.confidence.desc())
+        .all(),
         media_type=VIDEO_MIME_TYPES.get(
             video.filename.rsplit(".", 1)[-1].lower(),
             "video/mp4",
         ),
     )
+
+
+@videos_bp.route("/videos/<int:video_id>/annotated")
+@login_required
+def annotated_media(video_id):
+    video = db.session.get(Video, video_id)
+    if video is None:
+        abort(404)
+    if not video.annotated_video_filename:
+        abort(404)
+    path = detection_folder() / video.annotated_video_filename
+    if not path.is_file():
+        abort(404)
+    return send_from_directory(detection_folder(), video.annotated_video_filename, mimetype="video/mp4")
 
 
 @videos_bp.route("/videos/<int:video_id>/detect-signs", methods=["POST"])
@@ -387,8 +566,22 @@ def detect_signs(video_id):
         return redirect(url_for("videos.watch", video_id=video.id))
     try:
         try:
+            video.processing_status = "processing"
+            video.analysis_status = "processing"
+            db.session.commit()
             detected, frame_count = detect_traffic_signs(video)
+            if detected:
+                try:
+                    generate_annotated_video(video)
+                except RuntimeError:
+                    pass
+            video.analysis_status = "analysed" if detected else "failed"
+            video.processing_status = "analysed" if detected else "failed"
+            db.session.commit()
         except RuntimeError as error:
+            video.analysis_status = "failed"
+            video.processing_status = "failed"
+            db.session.commit()
             flash(str(error), "error")
             return redirect(url_for("videos.watch", video_id=video.id))
         flash(
@@ -400,10 +593,60 @@ def detect_signs(video_id):
         lock.release()
 
 
+@videos_bp.route("/videos/<int:video_id>/detect-markings", methods=["POST"])
+@login_required
+def detect_markings(video_id):
+    video = db.session.get(Video, video_id)
+    if video is None:
+        abort(404)
+    lock = detection_lock(video.id)
+    if not lock.acquire(blocking=False):
+        flash("Road-marking detection is already in progress for this video.", "info")
+        return redirect(url_for("videos.watch", video_id=video.id))
+    try:
+        try:
+            video.processing_status = "processing"
+            video.analysis_status = "processing"
+            db.session.commit()
+            detected, frame_count = detect_road_markings(video)
+            if detected:
+                try:
+                    generate_annotated_video(video)
+                except RuntimeError:
+                    pass
+            video.analysis_status = "analysed" if detected else "failed"
+            video.processing_status = "analysed" if detected else "failed"
+            db.session.commit()
+        except RuntimeError as error:
+            video.analysis_status = "failed"
+            video.processing_status = "failed"
+            db.session.commit()
+            flash(str(error), "error")
+            return redirect(url_for("videos.watch", video_id=video.id))
+        flash(
+            f"Road-marking detection completed: {detected} marking(s) found across {frame_count} extracted frame(s).",
+            "success",
+        )
+        return redirect(url_for("videos.watch", video_id=video.id))
+    finally:
+        lock.release()
+
+
 @videos_bp.route("/videos/<int:video_id>/detections/<path:filename>")
 @login_required
 def detection_media(video_id, filename):
     detection = TrafficSignDetection.query.filter_by(
+        video_id=video_id, annotated_filename=filename
+    ).first()
+    if detection is None:
+        abort(404)
+    return send_from_directory(detection_folder(), filename, mimetype="image/jpeg")
+
+
+@videos_bp.route("/videos/<int:video_id>/markings/<path:filename>")
+@login_required
+def marking_media(video_id, filename):
+    detection = RoadMarkingDetection.query.filter_by(
         video_id=video_id, annotated_filename=filename
     ).first()
     if detection is None:
