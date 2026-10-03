@@ -14,6 +14,7 @@ from flask import (
     url_for,
 )
 from flask_login import current_user, login_required
+from sqlalchemy.exc import SQLAlchemyError
 from werkzeug.utils import secure_filename
 
 from app.detectors import SpeedHumpDetector, TrafficSignDetector
@@ -402,36 +403,42 @@ def extract_video_frames(video, interval_seconds):
     except ImportError as error:
         raise RuntimeError("OpenCV is not installed. Run pip install -r requirements.txt.") from error
 
+    if not isfinite(interval_seconds) or interval_seconds <= 0:
+        raise RuntimeError("Choose a valid extraction interval greater than zero seconds.")
+
     video_path = upload_folder() / video.filename
     if not video_path.is_file():
         raise RuntimeError("The video file could not be found on the server.")
 
-    capture = cv2.VideoCapture(str(video_path))
-    if not capture.isOpened():
-        capture.release()
-        raise RuntimeError("OpenCV could not open this video file.")
-
-    fps_value = float(capture.get(cv2.CAP_PROP_FPS) or 0)
-    fps = fps_value if isfinite(fps_value) and fps_value > 0 else None
-    frame_count_value = float(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-    total_frames = int(frame_count_value) if frame_count_value > 0 else None
-    duration = total_frames / fps if total_frames and fps else None
-    step_frames = max(1, round((fps or 1) * interval_seconds))
-    max_frames = current_app.config["MAX_EXTRACTED_FRAMES"]
+    output_folder = frame_folder()
+    capture = None
     old_frames = list(video.frames)
-
     saved_paths = []
-    extracted = 0
-    frame_number = 0
-    next_frame = 0
     try:
+        capture = cv2.VideoCapture(str(video_path))
+        if not capture.isOpened():
+            raise RuntimeError(
+                "OpenCV could not open this video. Try a standard MP4 (H.264) or AVI file."
+            )
+
+        fps_value = float(capture.get(cv2.CAP_PROP_FPS) or 0)
+        fps = fps_value if isfinite(fps_value) and fps_value > 0 else None
+        frame_count_value = float(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        total_frames = int(frame_count_value) if frame_count_value > 0 else None
+        duration = total_frames / fps if total_frames and fps else None
+        step_frames = max(1, round((fps or 1) * interval_seconds))
+        max_frames = current_app.config["MAX_EXTRACTED_FRAMES"]
+        extracted = 0
+        frame_number = 0
+        next_frame = 0
+
         while extracted < max_frames:
             success, image = capture.read()
             if not success:
                 break
             if frame_number >= next_frame:
                 filename = frame_name(video.id, frame_number)
-                path = frame_folder() / filename
+                path = output_folder / filename
                 if not cv2.imwrite(str(path), image):
                     raise RuntimeError("OpenCV could not save an extracted frame.")
                 saved_paths.append(path)
@@ -446,20 +453,32 @@ def extract_video_frames(video, interval_seconds):
                 extracted += 1
                 next_frame += step_frames
             frame_number += 1
-        capture.release()
+
         if extracted == 0:
-            raise RuntimeError("No frames could be extracted from this video.")
+            raise RuntimeError(
+                "No frames could be extracted. The video may be empty, damaged, or encoded with an unsupported codec."
+            )
         remove_frame_files(old_frames)
         for old_frame in old_frames:
             db.session.delete(old_frame)
         db.session.commit()
+    except cv2.error as error:
+        db.session.rollback()
+        for path in saved_paths:
+            if path.is_file():
+                path.unlink()
+        raise RuntimeError(
+            "OpenCV could not decode this video. Try converting it to a standard MP4 (H.264) or AVI file."
+        ) from error
     except Exception:
-        capture.release()
         for path in saved_paths:
             if path.is_file():
                 path.unlink()
         db.session.rollback()
         raise
+    finally:
+        if capture is not None:
+            capture.release()
 
     return extracted, fps, total_frames, duration, extracted >= max_frames
 
@@ -680,7 +699,41 @@ def extract(video_id):
                 video, form.interval_seconds.data
             )
         except RuntimeError as error:
+            db.session.rollback()
+            current_app.logger.warning(
+                "Frame extraction failed for video %s: %s", video.id, error
+            )
             flash(str(error), "error")
+            return redirect(url_for("videos.watch", video_id=video.id))
+        except OSError:
+            db.session.rollback()
+            current_app.logger.exception(
+                "Frame extraction could not access storage for video %s", video.id
+            )
+            flash(
+                "The video or frame storage is unavailable. Check that the Render disk is mounted and that MEDIA_ROOT is writable.",
+                "error",
+            )
+            return redirect(url_for("videos.watch", video_id=video.id))
+        except SQLAlchemyError:
+            db.session.rollback()
+            current_app.logger.exception(
+                "Frame extraction could not save results for video %s", video.id
+            )
+            flash(
+                "The extracted frames could not be saved to the database. Please try again.",
+                "error",
+            )
+            return redirect(url_for("videos.watch", video_id=video.id))
+        except Exception:
+            db.session.rollback()
+            current_app.logger.exception(
+                "Unexpected frame extraction failure for video %s", video.id
+            )
+            flash(
+                "Frame extraction failed unexpectedly. The error has been logged; please try again.",
+                "error",
+            )
             return redirect(url_for("videos.watch", video_id=video.id))
 
         details = [f"Extracted {extracted} frame(s)"]
