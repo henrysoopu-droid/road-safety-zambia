@@ -1,6 +1,6 @@
 {% extends "base.html" %}
-{% block title %}{{ module.title }} · Road Safety in Zambia{% endblock %}
-{% block meta_description %}{{ module.title }} information from the Road Safety in Zambia Traffic Control Analysis System. Current capabilities and planned research are described here.{% endblock %}
+{% block title %}{{ module.title }} · Road Safety Zambia{% endblock %}
+{% block meta_description %}{{ module.title }} information from the Road Safety Zambia Traffic Control Analysis System. Current capabilities and planned research are described here.{% endblock %}
 {% block content %}
 <section class="page-intro">
     <p class="eyebrow">Public information</p>
@@ -9,12 +9,7 @@
     <p>{{ module.summary }}</p>
 </section>
 <section class="panel">
-    <h2>Planned for later versions</h2>
-    <ul class="planned-list">
-        {% for item in module.planned %}
-            <li>{{ item }}</li>
-        {% endfor %}
-    </ul>
-    <p class="muted">This module is reserved. No analysis data is generated in Version 1.</p>
+    <h2>Module information</h2>
+    <p>Review uploaded footage and completed analysis from the Road Videos workspace.</p>
 </section>
 {% endblock %}
