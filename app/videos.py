@@ -78,6 +78,18 @@ def frame_name(video_id, frame_number):
     return f"video_{video_id}_{frame_number}_{uuid4().hex}.jpg"
 
 
+def cleanup_extraction_files(paths, video_id):
+    for path in set(paths):
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            current_app.logger.exception(
+                "Could not remove extraction media for video %s: %s",
+                video_id,
+                path,
+            )
+
+
 def remove_frame_files(frames):
     folder = frame_folder()
     for frame in frames:
@@ -413,6 +425,21 @@ def extract_video_frames(video, interval_seconds):
     output_folder = frame_folder()
     capture = None
     old_frames = list(video.frames)
+    old_signs = TrafficSignDetection.query.filter_by(video_id=video.id).all()
+    old_markings = RoadMarkingDetection.query.filter_by(video_id=video.id).all()
+    old_detection_files = [
+        detection_folder() / detection.annotated_filename
+        for detection in [*old_signs, *old_markings]
+        if detection.annotated_filename
+    ]
+    old_frame_files = [
+        output_folder / frame.filename for frame in old_frames
+    ]
+    old_annotated_video = (
+        detection_folder() / video.annotated_video_filename
+        if video.annotated_video_filename
+        else None
+    )
     saved_paths = []
     try:
         capture = cv2.VideoCapture(str(video_path))
@@ -458,27 +485,32 @@ def extract_video_frames(video, interval_seconds):
             raise RuntimeError(
                 "No frames could be extracted. The video may be empty, damaged, or encoded with an unsupported codec."
             )
-        remove_frame_files(old_frames)
+        for detection in [*old_signs, *old_markings]:
+            db.session.delete(detection)
         for old_frame in old_frames:
             db.session.delete(old_frame)
+        video.annotated_video_filename = None
+        video.processing_status = "frames_extracted"
+        video.analysis_status = "not_started"
         db.session.commit()
     except cv2.error as error:
         db.session.rollback()
-        for path in saved_paths:
-            if path.is_file():
-                path.unlink()
+        cleanup_extraction_files(saved_paths, video.id)
         raise RuntimeError(
             "OpenCV could not decode this video. Try converting it to a standard MP4 (H.264) or AVI file."
         ) from error
     except Exception:
-        for path in saved_paths:
-            if path.is_file():
-                path.unlink()
         db.session.rollback()
+        cleanup_extraction_files(saved_paths, video.id)
         raise
     finally:
         if capture is not None:
             capture.release()
+
+    old_files = old_frame_files + old_detection_files
+    if old_annotated_video is not None:
+        old_files.append(old_annotated_video)
+    cleanup_extraction_files(old_files, video.id)
 
     return extracted, fps, total_frames, duration, extracted >= max_frames
 

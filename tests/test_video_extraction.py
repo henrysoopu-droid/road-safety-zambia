@@ -9,7 +9,9 @@ import numpy as np
 
 from app import create_app
 from app.extensions import db
-from app.models import Frame, User, Video
+from app.models import Frame, RoadMarkingDetection, User, Video
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
 
 
 class VideoExtractionTests(unittest.TestCase):
@@ -94,6 +96,132 @@ class VideoExtractionTests(unittest.TestCase):
             self.assertEqual(len(frames), 2)
             for frame in frames:
                 self.assertTrue((frame_folder / frame.filename).is_file())
+
+    def test_repeated_extraction_replaces_frames_and_cleans_old_records(self):
+        first_response = self.extract()
+        self.assertEqual(first_response.status_code, 200)
+
+        with self.app.app_context():
+            old_frame = Frame.query.filter_by(video_id=self.video_id).first()
+            old_frame_id = old_frame.id
+            old_frame_name = old_frame.filename
+            old_image_path = (
+                Path(self.app.config["FRAME_UPLOAD_FOLDER"]) / old_frame_name
+            )
+            old_annotation_name = "old-marking.jpg"
+            old_annotation_path = (
+                Path(self.app.config["DETECTION_UPLOAD_FOLDER"])
+                / old_annotation_name
+            )
+            self.assertTrue(
+                cv2.imwrite(
+                    str(old_annotation_path),
+                    np.zeros((64, 64, 3), dtype=np.uint8),
+                )
+            )
+            db.session.add(
+                RoadMarkingDetection(
+                    video_id=self.video_id,
+                    frame_id=old_frame_id,
+                    class_name="lane marking",
+                    confidence=0.8,
+                    frame_number=old_frame.frame_number,
+                    timestamp_seconds=old_frame.timestamp_seconds,
+                    frame_filename=old_frame_name,
+                    annotated_filename=old_annotation_name,
+                )
+            )
+            db.session.commit()
+
+        response = self.extract()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Extracted 2 frame(s)", response.get_data(as_text=True))
+        self.assertFalse(old_image_path.exists())
+        self.assertFalse(old_annotation_path.exists())
+        with self.app.app_context():
+            self.assertIsNone(db.session.get(Frame, old_frame_id))
+            self.assertEqual(
+                RoadMarkingDetection.query.filter_by(video_id=self.video_id).count(),
+                0,
+            )
+            frames = Frame.query.filter_by(video_id=self.video_id).all()
+            self.assertEqual(len(frames), 2)
+            self.assertTrue(
+                all(
+                    (Path(self.app.config["FRAME_UPLOAD_FOLDER"]) / frame.filename).is_file()
+                    for frame in frames
+                )
+            )
+
+    def test_invalid_video_retry_preserves_existing_frames_and_files(self):
+        first_response = self.extract()
+        self.assertEqual(first_response.status_code, 200)
+        with self.app.app_context():
+            old_frames = Frame.query.filter_by(video_id=self.video_id).all()
+            old_frame_ids = {frame.id for frame in old_frames}
+            old_frame_names = {frame.filename for frame in old_frames}
+        frame_folder = Path(self.app.config["FRAME_UPLOAD_FOLDER"])
+        video_path = Path(self.app.config["VIDEO_UPLOAD_FOLDER"]) / "source.mp4"
+        video_path.write_bytes(b"not a valid video stream")
+
+        response = self.extract()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(
+            "OpenCV could not open this video.",
+            response.get_data(as_text=True),
+        )
+        with self.app.app_context():
+            self.assertEqual(
+                {
+                    frame.id
+                    for frame in Frame.query.filter_by(video_id=self.video_id).all()
+                },
+                old_frame_ids,
+            )
+        self.assertEqual(
+            {path.name for path in frame_folder.glob("*.jpg")},
+            old_frame_names,
+        )
+
+    def test_database_failure_preserves_existing_frames_and_files(self):
+        with self.app.app_context():
+            old_frame = Frame(
+                video_id=self.video_id,
+                frame_number=99,
+                timestamp_seconds=9.9,
+                filename="old-frame.jpg",
+            )
+            db.session.add(old_frame)
+            db.session.commit()
+            old_frame_id = old_frame.id
+            old_frame_path = (
+                Path(self.app.config["FRAME_UPLOAD_FOLDER"]) / old_frame.filename
+            )
+            self.assertTrue(
+                cv2.imwrite(
+                    str(old_frame_path),
+                    np.zeros((64, 64, 3), dtype=np.uint8),
+                )
+            )
+
+        with patch.object(
+            Session,
+            "commit",
+            side_effect=SQLAlchemyError("simulated commit failure"),
+        ):
+            response = self.extract()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("could not be saved to the database", response.get_data(as_text=True))
+        self.assertTrue(old_frame_path.is_file())
+        with self.app.app_context():
+            self.assertIsNotNone(db.session.get(Frame, old_frame_id))
+            self.assertEqual(
+                {path.name for path in Path(self.app.config["FRAME_UPLOAD_FOLDER"]).glob("*.jpg")},
+                {old_frame_path.name},
+            )
 
     def test_extraction_storage_error_displays_actionable_message(self):
         with patch(
