@@ -36,6 +36,16 @@ def sqlite_uri(instance_path, database_url):
     return "sqlite:///" + db_path.as_posix()
 
 
+def positive_int_setting(name, default):
+    try:
+        value = int(os.getenv(name, str(default)))
+    except ValueError as error:
+        raise RuntimeError(f"{name} must be a positive integer.") from error
+    if value <= 0:
+        raise RuntimeError(f"{name} must be a positive integer.")
+    return value
+
+
 def remove_detection_filename_uniqueness():
     inspector = inspect(db.engine)
     dialect = db.engine.dialect
@@ -133,8 +143,8 @@ def create_app():
         raise RuntimeError("SECRET_KEY is not set. Configure it in the deployment environment.")
 
     debug = os.getenv("FLASK_DEBUG", "0").lower() in {"1", "true", "yes"}
-    max_upload_mb = int(os.getenv("MAX_UPLOAD_MB", "500"))
-    max_extracted_frames = int(os.getenv("MAX_EXTRACTED_FRAMES", "5000"))
+    max_upload_mb = positive_int_setting("MAX_UPLOAD_MB", 500)
+    max_extracted_frames = positive_int_setting("MAX_EXTRACTED_FRAMES", 500)
 
     database_url = os.getenv("DATABASE_URL", "sqlite:///instance/road_safety.db")
     if database_url.startswith("postgres://"):
@@ -192,6 +202,15 @@ def create_app():
         model_folder / "speed_humps" / os.getenv("SPEED_HUMP_MODEL", "speed_hump_model.pt")
     )
     app.config["TRAFFIC_SIGN_CONFIDENCE"] = float(os.getenv("TRAFFIC_SIGN_CONFIDENCE", "0.40"))
+    app.config["TRAFFIC_SIGN_IMAGE_SIZE"] = positive_int_setting(
+        "TRAFFIC_SIGN_IMAGE_SIZE", 416
+    )
+    app.config["TRAFFIC_SIGN_MAX_DETECTIONS"] = positive_int_setting(
+        "TRAFFIC_SIGN_MAX_DETECTIONS", 50
+    )
+    app.config["TRAFFIC_SIGN_CPU_THREADS"] = positive_int_setting(
+        "TRAFFIC_SIGN_CPU_THREADS", 1
+    )
     app.config["SPEED_HUMP_CONFIDENCE"] = float(os.getenv("SPEED_HUMP_CONFIDENCE", "0.40"))
     app.config["MODEL_CONFIG"] = {
         "traffic_sign": {

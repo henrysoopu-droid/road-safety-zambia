@@ -27,6 +27,14 @@ services:
         value: instance/models
       - key: TRAFFIC_SIGN_MODEL
         value: yolov8s-best.pt
+      - key: MAX_EXTRACTED_FRAMES
+        value: "500"
+      - key: TRAFFIC_SIGN_IMAGE_SIZE
+        value: "416"
+      - key: TRAFFIC_SIGN_MAX_DETECTIONS
+        value: "50"
+      - key: TRAFFIC_SIGN_CPU_THREADS
+        value: "1"
 
 databases:
   - name: road-safety-db
