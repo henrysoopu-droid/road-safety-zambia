@@ -46,10 +46,15 @@ Required environment variables:
 - `TRAFFIC_SIGN_MODEL_PATH`: optional full path override for the YOLOv8 checkpoint.
 - `COOKIE_SECURE=1` when the deployment is served over HTTPS.
 - `MAX_UPLOAD_MB=500` to configure the upload limit.
-- `MAX_EXTRACTED_FRAMES=5000` to cap controlled frame extraction.
+- `MAX_EXTRACTED_FRAMES=500` to cap frames extracted per video; frames are decoded sequentially.
+- `TRAFFIC_SIGN_IMAGE_SIZE=416` to configure YOLOv8 inference dimensions.
+- `TRAFFIC_SIGN_MAX_DETECTIONS=50` to cap detections returned for each frame.
+- `TRAFFIC_SIGN_CPU_THREADS=1` to limit PyTorch CPU parallelism on low-memory hosts.
 - `SITE_URL`: public HTTPS origin, for example `https://roadsafety-zambia.onrender.com`.
 
 The app accepts Render's `postgres://` or `postgresql://` URL and converts it to the psycopg SQLAlchemy dialect.
+
+Traffic-sign inference runs on CPU with one cached YOLOv8 model, one frame at a time, using streaming results. A 416-pixel inference size reduces peak memory but can miss small or distant signs. Increase it only if the deployment has sufficient memory.
 
 ## Render deployment
 

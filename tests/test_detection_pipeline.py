@@ -2,16 +2,23 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import cv2
 import numpy as np
 from sqlalchemy import MetaData, create_engine, inspect, UniqueConstraint
 
 from app import create_app
+from app.detectors import TrafficSignDetector
 from app.extensions import db
 from app.models import Frame, RoadMarkingDetection, TrafficSignDetection, User, Video
-from app.videos import detect_road_markings, detect_traffic_signs, generate_annotated_video
+from app.videos import (
+    detect_road_markings,
+    detect_traffic_signs,
+    generate_annotated_video,
+    traffic_sign_model,
+)
 
 
 class FixedTrafficSignDetector:
@@ -138,6 +145,62 @@ class DetectionPipelineTests(unittest.TestCase):
             output_path = Path(self.app.config["DETECTION_UPLOAD_FOLDER"]) / output_name
             self.assertTrue(output_path.is_file())
             self.assertGreater(output_path.stat().st_size, 0)
+
+    def test_yolo_inference_uses_bounded_streaming_cpu_settings(self):
+        detector = TrafficSignDetector(
+            model_path="unused-for-mocked-model.pt",
+            image_size=416,
+            max_detections=2,
+            cpu_threads=1,
+        )
+
+        class Box:
+            def __init__(self, x):
+                self.xyxy = [np.array([x, 10, x + 20, 30])]
+                self.conf = [0.9]
+                self.cls = [0]
+
+        stream_closed = []
+
+        def prediction_stream(**kwargs):
+            try:
+                yield SimpleNamespace(
+                    names={0: "Stop"},
+                    boxes=[Box(1), Box(30), Box(60)],
+                )
+            finally:
+                stream_closed.append(True)
+
+        detector.model = Mock()
+        detector.model.names = {0: "Stop"}
+        detector.model.predict.side_effect = prediction_stream
+        with patch("torch.set_num_threads") as set_num_threads:
+            detections = detector.predict(np.zeros((64, 64, 3), dtype=np.uint8))
+
+        self.assertEqual(len(detections), 2)
+        self.assertEqual(detections[0]["class_name"], "Stop Sign")
+        set_num_threads.assert_called_once_with(1)
+        detector.model.predict.assert_called_once()
+        self.assertEqual(detector.model.predict.call_args.kwargs["imgsz"], 416)
+        self.assertEqual(detector.model.predict.call_args.kwargs["max_det"], 2)
+        self.assertEqual(detector.model.predict.call_args.kwargs["device"], "cpu")
+        self.assertTrue(detector.model.predict.call_args.kwargs["stream"])
+        self.assertEqual(stream_closed, [True])
+
+    def test_traffic_sign_detector_instance_is_reused_for_matching_config(self):
+        with self.app.app_context():
+            with (
+                patch("app.videos._TRAFFIC_SIGN_DETECTOR", None),
+                patch("app.videos._TRAFFIC_SIGN_DETECTOR_KEY", None),
+                patch("app.videos.TrafficSignDetector") as detector_factory,
+            ):
+                detector_factory.return_value = object()
+
+                first = traffic_sign_model()
+                second = traffic_sign_model()
+
+                self.assertIs(first, second)
+                detector_factory.assert_called_once()
 
 
 if __name__ == "__main__":

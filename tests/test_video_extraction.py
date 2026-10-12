@@ -97,6 +97,54 @@ class VideoExtractionTests(unittest.TestCase):
             for frame in frames:
                 self.assertTrue((frame_folder / frame.filename).is_file())
 
+    def test_extraction_respects_maximum_frame_limit(self):
+        self.app.config["MAX_EXTRACTED_FRAMES"] = 1
+
+        response = self.extract()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Extracted 1 frame(s)", response.get_data(as_text=True))
+        self.assertIn("maximum extraction limit reached", response.get_data(as_text=True))
+        with self.app.app_context():
+            self.assertEqual(Frame.query.filter_by(video_id=self.video_id).count(), 1)
+
+    def test_capture_is_released_when_frame_storage_fails(self):
+        real_video_capture = cv2.VideoCapture
+        captures = []
+
+        class TrackingCapture:
+            def __init__(self, path):
+                self.capture = real_video_capture(path)
+                self.released = False
+                captures.append(self)
+
+            def isOpened(self):
+                return self.capture.isOpened()
+
+            def get(self, property_id):
+                return self.capture.get(property_id)
+
+            def read(self):
+                return self.capture.read()
+
+            def release(self):
+                self.released = True
+                self.capture.release()
+
+        with (
+            patch("cv2.VideoCapture", side_effect=TrackingCapture),
+            patch(
+                "cv2.imwrite",
+                side_effect=OSError("simulated frame storage failure"),
+            ),
+        ):
+            response = self.extract()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("storage is unavailable", response.get_data(as_text=True))
+        self.assertEqual(len(captures), 1)
+        self.assertTrue(captures[0].released)
+
     def test_repeated_extraction_replaces_frames_and_cleans_old_records(self):
         first_response = self.extract()
         self.assertEqual(first_response.status_code, 200)
@@ -140,7 +188,13 @@ class VideoExtractionTests(unittest.TestCase):
         self.assertFalse(old_image_path.exists())
         self.assertFalse(old_annotation_path.exists())
         with self.app.app_context():
-            self.assertIsNone(db.session.get(Frame, old_frame_id))
+            db.session.expire_all()
+            self.assertFalse(
+                Frame.query.filter_by(
+                    video_id=self.video_id,
+                    filename=old_frame_name,
+                ).first()
+            )
             self.assertEqual(
                 RoadMarkingDetection.query.filter_by(video_id=self.video_id).count(),
                 0,
