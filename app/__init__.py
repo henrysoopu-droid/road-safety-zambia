@@ -7,6 +7,7 @@ from sqlalchemy import MetaData, inspect, text
 from sqlalchemy.schema import CreateTable
 from werkzeug.middleware.proxy_fix import ProxyFix
 
+from app.detectors import TRAFFIC_SIGN_CLASS_NAMES
 from app.extensions import csrf, db, login_manager
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -150,7 +151,23 @@ def create_app():
     detection_upload_folder = media_root / "detections"
     detection_upload_folder.mkdir(parents=True, exist_ok=True)
     model_folder = Path(os.getenv("MODEL_DIR", Path(app.instance_path) / "models"))
+    if not model_folder.is_absolute():
+        model_folder = BASE_DIR / model_folder
+    model_folder = model_folder.resolve()
     model_folder.mkdir(parents=True, exist_ok=True)
+    configured_traffic_sign_path = Path(
+        os.getenv(
+            "TRAFFIC_SIGN_MODEL_PATH",
+            str(
+                model_folder
+                / "traffic_signs"
+                / os.getenv("TRAFFIC_SIGN_MODEL", "yolov8s-best.pt")
+            ),
+        )
+    )
+    if not configured_traffic_sign_path.is_absolute():
+        configured_traffic_sign_path = BASE_DIR / configured_traffic_sign_path
+    configured_traffic_sign_path = configured_traffic_sign_path.resolve()
 
     app.config["APP_NAME"] = "Road Safety Zambia"
     app.config["SECRET_KEY"] = secret_key
@@ -170,9 +187,7 @@ def create_app():
     app.config["FRAME_UPLOAD_FOLDER"] = str(frame_upload_folder)
     app.config["DETECTION_UPLOAD_FOLDER"] = str(detection_upload_folder)
     app.config["MODEL_DIR"] = str(model_folder)
-    app.config["TRAFFIC_SIGN_MODEL_PATH"] = str(
-        model_folder / "traffic_signs" / os.getenv("TRAFFIC_SIGN_MODEL", "yolov8s-best.pt")
-    )
+    app.config["TRAFFIC_SIGN_MODEL_PATH"] = str(configured_traffic_sign_path)
     app.config["SPEED_HUMP_MODEL_PATH"] = str(
         model_folder / "speed_humps" / os.getenv("SPEED_HUMP_MODEL", "speed_hump_model.pt")
     )
@@ -183,23 +198,7 @@ def create_app():
             "name": os.getenv("TRAFFIC_SIGN_MODEL", "yolov8s-best.pt"),
             "format": "YOLOv8 PT weights",
             "inference": "Ultralytics YOLO",
-            "classes": [
-                "Stop",
-                "Red Light",
-                "Green Light",
-                "Speed Limit 10",
-                "Speed Limit 100",
-                "Speed Limit 110",
-                "Speed Limit 120",
-                "Speed Limit 20",
-                "Speed Limit 30",
-                "Speed Limit 40",
-                "Speed Limit 50",
-                "Speed Limit 60",
-                "Speed Limit 70",
-                "Speed Limit 80",
-                "Speed Limit 90",
-            ],
+            "classes": TRAFFIC_SIGN_CLASS_NAMES,
         },
         "speed_hump": {
             "name": os.getenv("SPEED_HUMP_MODEL", "speed_hump_model.pt"),

@@ -133,8 +133,15 @@ def detect_traffic_signs(video):
     if not frames:
         raise RuntimeError("Extract frames before detecting traffic signs.")
     if not detector.is_available():
+        expected_path = getattr(
+            detector,
+            "model_path",
+            current_app.config["TRAFFIC_SIGN_MODEL_PATH"],
+        )
         raise RuntimeError(
-            "Traffic-sign model not found. Place the YOLOv8 weights in instance/models/traffic_signs/yolov8s-best.pt or update TRAFFIC_SIGN_MODEL_PATH."
+            "Traffic-sign YOLOv8 weights were not found. "
+            f"Expected file: {expected_path}. Set TRAFFIC_SIGN_MODEL_PATH "
+            "to the model file or include it at the configured model path."
         )
 
     old_detections = TrafficSignDetection.query.filter_by(video_id=video.id).all()

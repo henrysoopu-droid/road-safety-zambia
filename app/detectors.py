@@ -1,14 +1,15 @@
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
+
 
 TRAFFIC_SIGN_CLASS_NAMES = [
-    "Stop",
-    "Red Light",
     "Green Light",
-    "Speed Limit 10",
+    "Red Light",
     "Speed Limit 100",
     "Speed Limit 110",
     "Speed Limit 120",
@@ -20,12 +21,15 @@ TRAFFIC_SIGN_CLASS_NAMES = [
     "Speed Limit 70",
     "Speed Limit 80",
     "Speed Limit 90",
+    "Stop",
 ]
 
 
 def model_root() -> Path:
     model_dir = Path(os.getenv("MODEL_DIR", str(Path(__file__).resolve().parent.parent / "instance" / "models")))
-    return model_dir
+    if not model_dir.is_absolute():
+        model_dir = Path(__file__).resolve().parent.parent / model_dir
+    return model_dir.resolve()
 
 
 def normalize_traffic_sign_name(raw_name: str) -> str:
@@ -49,15 +53,21 @@ def normalize_traffic_sign_name(raw_name: str) -> str:
 class TrafficSignDetector:
     """Load and run the YOLOv8 traffic-sign model for this project.
 
-    This selected model was trained on a general traffic-sign dataset and is not a
-    guaranteed fit for Zambian or SADC road signs. Its performance must be evaluated
-    on local road footage before any production claims are made.
+    The checkpoint's traffic-sign labels are verified, but its training source and
+    fit for Zambian or SADC roads are not independently verified. Evaluate it on
+    local road footage before making production claims.
     """
 
     def __init__(self, model_path: str | os.PathLike[str] | None = None, threshold: float | None = None):
-        self.model_path = Path(model_path) if model_path is not None else Path(
-            os.getenv("TRAFFIC_SIGN_MODEL_PATH", str(model_root() / "traffic_signs" / "yolov8s-best.pt"))
+        configured_path = Path(model_path) if model_path is not None else Path(
+            os.getenv(
+                "TRAFFIC_SIGN_MODEL_PATH",
+                str(model_root() / "traffic_signs" / "yolov8s-best.pt"),
+            )
         )
+        if not configured_path.is_absolute():
+            configured_path = Path(__file__).resolve().parent.parent / configured_path
+        self.model_path = configured_path.resolve()
         self.threshold = float(threshold if threshold is not None else os.getenv("TRAFFIC_SIGN_CONFIDENCE", "0.40"))
         self.model = None
 
@@ -69,13 +79,26 @@ class TrafficSignDetector:
             return self.model
         if not self.is_available():
             raise RuntimeError(
-                f"Traffic-sign model not found at {self.model_path}. Place the YOLOv8 weights file there or set TRAFFIC_SIGN_MODEL_PATH."
+                "Traffic-sign YOLOv8 weights were not found. "
+                f"Expected file: {self.model_path}. Set TRAFFIC_SIGN_MODEL_PATH "
+                "to the model file or include it at the configured model path."
             )
         try:
             from ultralytics import YOLO
         except ImportError as exc:  # pragma: no cover - dependency guard
             raise RuntimeError("Ultralytics is required. Install it with pip install -r requirements.txt.") from exc
-        self.model = YOLO(str(self.model_path))
+        try:
+            self.model = YOLO(str(self.model_path))
+        except Exception as exc:
+            logger.exception(
+                "Failed to load traffic-sign YOLOv8 weights from %s",
+                self.model_path,
+            )
+            raise RuntimeError(
+                "Traffic-sign YOLOv8 weights exist but could not be loaded from "
+                f"{self.model_path} ({type(exc).__name__}: {exc}). Verify that the "
+                "file is a valid Ultralytics detection checkpoint."
+            ) from exc
         return self.model
 
     def predict(self, image, max_detections: int | None = None):

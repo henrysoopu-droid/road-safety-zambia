@@ -41,8 +41,9 @@ Required environment variables:
 - `DATABASE_URL`: PostgreSQL connection string for a multi-instance deployment, or a SQLite URL on a persistent single-instance disk.
 - `FLASK_DEBUG=0`.
 - `MEDIA_ROOT`: persistent storage root for uploaded videos, extracted frames, and annotated detection images.
-- `MODEL_DIR`: directory containing `yolov5s.onnx`.
-- `TRAFFIC_SIGN_MODEL`: model filename, normally `yolov5s.onnx`.
+- `MODEL_DIR`: model directory; relative paths resolve from the project root.
+- `TRAFFIC_SIGN_MODEL`: model filename; the included YOLOv8 checkpoint is `yolov8s-best.pt`.
+- `TRAFFIC_SIGN_MODEL_PATH`: optional full path override for the YOLOv8 checkpoint.
 - `COOKIE_SECURE=1` when the deployment is served over HTTPS.
 - `MAX_UPLOAD_MB=500` to configure the upload limit.
 - `MAX_EXTRACTED_FRAMES=5000` to cap controlled frame extraction.
@@ -57,7 +58,7 @@ The included `render.yaml` creates a web service and PostgreSQL database. In the
 1. Push this repository to GitHub, excluding `.env`, local databases, uploads, and generated frame/detection files.
 2. Create a new Render Blueprint from the GitHub repository.
 3. Attach a Render persistent disk mounted at `/var/data` to the web service.
-4. Keep `MODEL_DIR=instance/models`; the tracked `yolov5s.onnx` file is deployed with the application code.
+4. Keep `MODEL_DIR=instance/models`; the project YOLOv8 checkpoint is deployed at `instance/models/traffic_signs/yolov8s-best.pt`. The checkpoint is 22.5 MB and is tracked with the application, so Render does not need model-bucket credentials to load it.
 5. Keep `MEDIA_ROOT=/var/data/uploads` so videos and derived images survive deploys.
 6. Confirm `SECRET_KEY` is generated or set as a secret environment variable and `FLASK_DEBUG=0`.
 7. Open `/healthz`; it should return `{"status":"ok"}`.

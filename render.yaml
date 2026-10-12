@@ -26,7 +26,7 @@ services:
       - key: MODEL_DIR
         value: instance/models
       - key: TRAFFIC_SIGN_MODEL
-        value: yolov5s.onnx
+        value: yolov8s-best.pt
 
 databases:
   - name: road-safety-db
