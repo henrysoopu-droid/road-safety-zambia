@@ -5,22 +5,26 @@
     <p class="eyebrow">Public video</p>
     <h1>{{ video.title }}</h1>
     <p class="lede">{{ video.location or 'Road location not provided' }}</p>
-    <p>Uploaded by {{ video.uploader.username }} on {{ video.uploaded_at.strftime("%d %b %Y, %H:%M") }}</p>
+    <p>Uploaded {{ video.uploaded_at.strftime("%d %b %Y, %H:%M") }}{% if video.expires_at %} · Expires {{ video.expires_at.strftime("%d %b %Y, %H:%M") }}{% endif %}</p>
 </section>
 
 <section class="panel manage-panel">
-    <div class="video-switcher">
-        <a class="btn btn-primary btn-compact" href="{{ url_for('main.public_video_file', video_id=video.id) }}" target="_blank" rel="noopener">▶ Play Original Video</a>
-        {% if video.annotated_video_filename %}
-            <a class="btn btn-secondary btn-compact" href="{{ url_for('main.public_annotated_video', video_id=video.id) }}" target="_blank" rel="noopener">▶ Play Analysed Video</a>
-        {% endif %}
-    </div>
-    <video class="video-player" controls preload="metadata">
-        <source src="{{ url_for('main.public_video_file', video_id=video.id) }}" type="video/mp4">
-        Your browser does not support embedded video playback.
-    </video>
+    {% if video.video_file_expired %}
+        <p class="field-error">The original video file has expired or was deleted. Published analysis results remain available below.</p>
+    {% else %}
+        <div class="video-switcher">
+            <a class="btn btn-primary btn-compact" href="{{ url_for('main.public_video_file', video_id=video.id) }}" target="_blank" rel="noopener">▶ Play Original Video</a>
+            {% if video.annotated_video_filename %}
+                <a class="btn btn-secondary btn-compact" href="{{ url_for('main.public_annotated_video', video_id=video.id) }}" target="_blank" rel="noopener">▶ Play Analysed Video</a>
+            {% endif %}
+        </div>
+        <video class="video-player" controls preload="metadata">
+            <source src="{{ url_for('main.public_video_file', video_id=video.id) }}" type="video/mp4">
+            Your browser does not support embedded video playback.
+        </video>
+    {% endif %}
     {% if video.description %}<p>{{ video.description }}</p>{% endif %}
-    <p class="video-meta">Status: {{ video.processing_status or 'uploaded' }} · Analysis: {{ video.analysis_status or 'not_started' }}</p>
+    <p class="video-meta">Status: {{ video.video_status }} · Analysis: {{ video.analysis_status or 'not_started' }}</p>
     <p class="muted-ink">This public page is read-only. Use the login pages for upload, analysis, and admin actions.</p>
 </section>
 

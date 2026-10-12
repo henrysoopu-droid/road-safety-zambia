@@ -45,7 +45,8 @@
                     <div>
                         <h3>{{ video.title }}</h3>
                         <p class="video-meta">{{ video.location or 'Road location not provided' }} · Uploaded {{ video.uploaded_at.strftime("%d %b %Y, %H:%M") }}</p>
-                        <p class="video-meta">Status: {{ video.processing_status or 'uploaded' }} · Analysis: {{ video.analysis_status or 'not_started' }}</p>
+                        <p class="video-meta">Status: {{ video.video_status }} · Analysis: {{ video.analysis_status or 'not_started' }}</p>
+                        <p class="video-meta">Expires: {{ video.expires_at.strftime("%d %b %Y, %H:%M") if video.expires_at else 'Not scheduled' }}</p>
                     </div>
                     <div class="video-actions">
                         <a class="btn btn-secondary btn-compact" href="{{ url_for('main.public_video_watch', video_id=video.id) }}">View results</a>

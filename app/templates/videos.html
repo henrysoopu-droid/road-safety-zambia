@@ -52,17 +52,18 @@
                         <p class="video-meta">Location: {{ video.location }}</p>
                         <p class="video-meta">Original file: {{ video.original_filename }}</p>
                         <p class="video-meta">Uploaded by: {{ video.uploader.username }} · {{ video.uploaded_at.strftime("%d %b %Y, %H:%M") }}</p>
+                        <p class="video-meta">Video status: {{ video.video_status }} · Expires: {{ video.expires_at.strftime("%d %b %Y, %H:%M") if video.expires_at else 'Not scheduled' }}</p>
                         {% if video.description %}
                             <p>{{ video.description }}</p>
                         {% endif %}
                     </div>
                     <div class="video-actions">
-                        <a class="btn btn-primary btn-compact" href="{{ url_for('videos.watch', video_id=video.id) }}">View / Play</a>
+                        <a class="btn btn-primary btn-compact" href="{{ url_for('videos.watch', video_id=video.id) }}">View / {% if video.video_file_expired %}Results{% else %}Play{% endif %}</a>
                         <a class="btn btn-secondary btn-compact" href="{{ url_for('videos.watch', video_id=video.id) }}#frames">Frames{% if video.frames %} ({{ video.frames|length }}){% endif %}</a>
                         {% if current_user.is_admin() %}
-                            <form method="post" action="{{ url_for('videos.delete', video_id=video.id) }}" onsubmit="return confirm('Delete this road video?');">
+                            <form method="post" action="{{ url_for('videos.delete', video_id=video.id) }}" onsubmit="return confirm('Delete the stored source video file? The record and analysis history will be retained.');">
                                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                                <button type="submit" class="btn btn-danger btn-compact">Delete</button>
+                                <button type="submit" class="btn btn-danger btn-compact">Delete video file</button>
                             </form>
                         {% endif %}
                     </div>

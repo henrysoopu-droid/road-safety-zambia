@@ -15,26 +15,71 @@ services:
         value: "0"
       - key: COOKIE_SECURE
         value: "1"
+      - key: MEDIA_STORAGE
+        value: s3
       - key: SITE_URL
         value: https://road-safety-zambia.onrender.com
       - key: DATABASE_URL
         fromDatabase:
           name: road-safety-db
           property: connectionString
-      - key: MEDIA_ROOT
-        value: /var/data/uploads
       - key: MODEL_DIR
         value: instance/models
       - key: TRAFFIC_SIGN_MODEL
         value: yolov8s-best.pt
       - key: MAX_EXTRACTED_FRAMES
         value: "500"
+      - key: VIDEO_RETENTION_HOURS
+        value: "24"
       - key: TRAFFIC_SIGN_IMAGE_SIZE
         value: "416"
       - key: TRAFFIC_SIGN_MAX_DETECTIONS
         value: "50"
       - key: TRAFFIC_SIGN_CPU_THREADS
         value: "1"
+      - key: S3_BUCKET
+        sync: false
+      - key: S3_REGION
+        sync: false
+      - key: S3_ENDPOINT_URL
+        sync: false
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+  - type: cron
+    name: road-safety-video-cleanup
+    repo: https://github.com/henrysoopu-droid/road-safety-zambia.git
+    branch: main
+    schedule: "*/15 * * * *"
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m app.cleanup
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true
+      - key: FLASK_DEBUG
+        value: "0"
+      - key: MEDIA_STORAGE
+        value: s3
+      - key: DATABASE_URL
+        fromDatabase:
+          name: road-safety-db
+          property: connectionString
+      - key: MODEL_DIR
+        value: instance/models
+      - key: VIDEO_RETENTION_HOURS
+        value: "24"
+      - key: S3_BUCKET
+        sync: false
+      - key: S3_REGION
+        sync: false
+      - key: S3_ENDPOINT_URL
+        sync: false
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
 
 databases:
   - name: road-safety-db

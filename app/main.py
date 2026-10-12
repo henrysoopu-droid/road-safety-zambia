@@ -1,7 +1,8 @@
-from flask import Blueprint, Response, current_app, redirect, render_template, send_from_directory, url_for
+from flask import Blueprint, Response, abort, current_app, redirect, render_template, url_for
 from flask_login import current_user, login_required
 
 from app.extensions import db
+from app.media_storage import media_storage
 from app.models import RoadMarkingDetection, TrafficSignDetection, Video
 
 main_bp = Blueprint("main", __name__)
@@ -129,8 +130,19 @@ def public_video_file(video_id):
     video = db.session.get(Video, video_id)
     if video is None:
         return "Video not found.", 404
-    folder = current_app.config["VIDEO_UPLOAD_FOLDER"]
-    return send_from_directory(folder, video.filename, mimetype="video/mp4")
+    if video.video_file_expired:
+        return (
+            "This video file has expired or was deleted. Its analysis results remain available.",
+            410,
+        )
+    try:
+        return media_storage().send("videos", video.filename, "video/mp4")
+    except FileNotFoundError:
+        current_app.logger.warning("Public source video file is missing for video %s", video.id)
+        return (
+            "This video file is unavailable. Its analysis results remain available.",
+            410,
+        )
 
 
 @main_bp.route("/public/videos/<int:video_id>/annotated")
@@ -140,8 +152,12 @@ def public_annotated_video(video_id):
         return "Video not found.", 404
     if not video.annotated_video_filename:
         return "Analysed video is not available yet.", 404
-    folder = current_app.config["DETECTION_UPLOAD_FOLDER"]
-    return send_from_directory(folder, video.annotated_video_filename, mimetype="video/mp4")
+    try:
+        return media_storage().send(
+            "detections", video.annotated_video_filename, "video/mp4"
+        )
+    except FileNotFoundError:
+        abort(404)
 
 
 @main_bp.route("/public/detections/<int:video_id>/<path:filename>")
@@ -149,8 +165,10 @@ def public_detection_media(video_id, filename):
     detection = TrafficSignDetection.query.filter_by(video_id=video_id, annotated_filename=filename).first()
     if detection is None:
         return "Detection not found.", 404
-    folder = current_app.config["DETECTION_UPLOAD_FOLDER"]
-    return send_from_directory(folder, filename, mimetype="image/jpeg")
+    try:
+        return media_storage().send("detections", filename, "image/jpeg")
+    except FileNotFoundError:
+        abort(404)
 
 
 @main_bp.route("/public/markings/<int:video_id>/<path:filename>")
@@ -158,8 +176,10 @@ def public_marking_media(video_id, filename):
     detection = RoadMarkingDetection.query.filter_by(video_id=video_id, annotated_filename=filename).first()
     if detection is None:
         return "Detection not found.", 404
-    folder = current_app.config["DETECTION_UPLOAD_FOLDER"]
-    return send_from_directory(folder, filename, mimetype="image/jpeg")
+    try:
+        return media_storage().send("detections", filename, "image/jpeg")
+    except FileNotFoundError:
+        abort(404)
 
 
 @main_bp.route("/signs")

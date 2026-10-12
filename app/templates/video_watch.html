@@ -9,18 +9,23 @@
 </section>
 
 <section class="panel manage-panel">
-    <div class="video-switcher">
-        <a class="btn btn-primary btn-compact" href="{{ url_for('videos.media', video_id=video.id) }}" target="_blank" rel="noopener">▶ Play Original Video</a>
-        {% if video.annotated_video_filename %}
-            <a class="btn btn-secondary btn-compact" href="{{ url_for('videos.annotated_media', video_id=video.id) }}" target="_blank" rel="noopener">▶ Play Analysed Video</a>
-        {% endif %}
-    </div>
-    <video class="video-player" controls preload="metadata">
-        <source src="{{ url_for('videos.media', video_id=video.id) }}" type="{{ media_type }}">
-        Your browser does not support embedded video playback.
-    </video>
+    {% if video.video_file_expired %}
+        <p class="field-error">The original video file has expired or was deleted. Analysis results and extracted frames remain available below.</p>
+    {% else %}
+        <div class="video-switcher">
+            <a class="btn btn-primary btn-compact" href="{{ url_for('videos.media', video_id=video.id) }}" target="_blank" rel="noopener">▶ Play Original Video</a>
+        </div>
+        <video class="video-player" controls preload="metadata">
+            <source src="{{ url_for('videos.media', video_id=video.id) }}" type="{{ media_type }}">
+            Your browser does not support embedded video playback.
+        </video>
+    {% endif %}
+    {% if video.annotated_video_filename %}
+        <a class="btn btn-secondary btn-compact" href="{{ url_for('videos.annotated_media', video_id=video.id) }}" target="_blank" rel="noopener">▶ Play Analysed Video</a>
+    {% endif %}
     <p class="video-meta">Original file: {{ video.original_filename }}</p>
-    <p class="video-meta">Status: {{ video.processing_status or 'uploaded' }} · Analysis: {{ video.analysis_status or 'not_started' }}</p>
+    <p class="video-meta">Status: {{ video.video_status }} · Analysis: {{ video.analysis_status or 'not_started' }}</p>
+    <p class="video-meta">Expires: {{ video.expires_at.strftime("%d %b %Y, %H:%M") if video.expires_at else 'Not scheduled' }}</p>
     {% if video.description %}
         <p>{{ video.description }}</p>
     {% endif %}
@@ -29,6 +34,7 @@
     {% else %}
         <p class="muted-ink">No analysed video is available yet. Run analysis to generate a processed playback version.</p>
     {% endif %}
+    {% if not video.video_file_expired %}
     <section class="frame-tools">
         <h2>Frame extraction</h2>
         <p>Extract one frame at a controlled interval for later analysis. Existing extracted frames will be replaced.</p>
@@ -40,6 +46,7 @@
             {{ extraction_form.submit(class_="btn btn-primary btn-compact") }}
         </form>
     </section>
+    {% endif %}
     <section class="frame-tools detection-tools">
         <h2>Traffic-sign detection</h2>
         <p>Run the pretrained detector on the extracted frames and generate the analysed playback overlay.</p>
@@ -113,9 +120,9 @@
     <div class="video-actions">
         <a class="btn btn-primary btn-compact" href="{{ url_for('videos.library') }}">Back to library</a>
         {% if current_user.is_admin() %}
-            <form method="post" action="{{ url_for('videos.delete', video_id=video.id) }}" onsubmit="return confirm('Delete this road video?');">
+            <form method="post" action="{{ url_for('videos.delete', video_id=video.id) }}" onsubmit="return confirm('Delete the stored source video file? The record and analysis history will be retained.');">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                <button type="submit" class="btn btn-danger btn-compact">Delete</button>
+                <button type="submit" class="btn btn-danger btn-compact">Delete video file</button>
             </form>
         {% endif %}
     </div>

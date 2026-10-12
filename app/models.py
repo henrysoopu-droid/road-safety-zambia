@@ -45,11 +45,14 @@ class Video(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     title = db.Column(db.String(160), nullable=False)
     filename = db.Column(db.String(255), nullable=False, unique=True)
+    content_sha256 = db.Column(db.String(64), nullable=True)
     original_filename = db.Column(db.String(255), nullable=False)
     location = db.Column(db.String(160), nullable=True, default="")
     description = db.Column(db.Text, nullable=True)
     uploaded_by = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
     uploaded_at = db.Column(db.DateTime, nullable=False, default=utc_now)
+    expires_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    video_file_deleted_at = db.Column(db.DateTime(timezone=True), nullable=True)
     processing_status = db.Column(db.String(30), nullable=False, default="uploaded")
     analysis_status = db.Column(db.String(30), nullable=False, default="not_started")
     annotated_video_filename = db.Column(db.String(255), nullable=True)
@@ -72,6 +75,30 @@ class Video(db.Model):
         lazy=True,
         cascade="all, delete-orphan",
     )
+    __table_args__ = (
+        db.Index("ix_videos_content_sha256", "content_sha256", unique=True),
+    )
+
+    @property
+    def video_file_expired(self):
+        if self.video_file_deleted_at is not None:
+            return True
+        if self.expires_at is None:
+            return False
+        expires_at = self.expires_at
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        return expires_at <= utc_now()
+
+    @property
+    def video_status(self):
+        if self.video_file_expired:
+            return "Expired"
+        if self.processing_status == "processing":
+            return "Processing"
+        if self.processing_status == "failed":
+            return "Failed"
+        return "Available"
 
 
 class Frame(db.Model):

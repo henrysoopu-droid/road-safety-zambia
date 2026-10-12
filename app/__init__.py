@@ -1,4 +1,5 @@
 import os
+from datetime import timedelta
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -9,9 +10,20 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 
 from app.detectors import TRAFFIC_SIGN_CLASS_NAMES
 from app.extensions import csrf, db, login_manager
+from app.media_storage import MediaStorage
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
+
+
+def positive_int_setting(name, default):
+    try:
+        value = int(os.getenv(name, str(default)))
+    except ValueError as error:
+        raise RuntimeError(f"{name} must be a positive integer.") from error
+    if value <= 0:
+        raise RuntimeError(f"{name} must be a positive integer.")
+    return value
 
 
 def sqlite_uri(instance_path, database_url):
@@ -34,16 +46,6 @@ def sqlite_uri(instance_path, database_url):
         db_path = (instance_dir / db_name).resolve()
 
     return "sqlite:///" + db_path.as_posix()
-
-
-def positive_int_setting(name, default):
-    try:
-        value = int(os.getenv(name, str(default)))
-    except ValueError as error:
-        raise RuntimeError(f"{name} must be a positive integer.") from error
-    if value <= 0:
-        raise RuntimeError(f"{name} must be a positive integer.")
-    return value
 
 
 def remove_detection_filename_uniqueness():
@@ -116,13 +118,34 @@ def ensure_database_schema(app):
         inspector = inspect(db.engine)
         if "videos" in inspector.get_table_names():
             video_columns = {column["name"] for column in inspector.get_columns("videos")}
+            datetime_type = (
+                "TIMESTAMP WITH TIME ZONE"
+                if db.engine.dialect.name == "postgresql"
+                else "DATETIME"
+            )
             for column_name, column_definition in {
                 "processing_status": "VARCHAR(30) NOT NULL DEFAULT 'uploaded'",
                 "analysis_status": "VARCHAR(30) NOT NULL DEFAULT 'not_started'",
                 "annotated_video_filename": "VARCHAR(255)",
+                "content_sha256": "VARCHAR(64)",
+                "expires_at": datetime_type,
+                "video_file_deleted_at": datetime_type,
             }.items():
                 if column_name not in video_columns:
                     db.session.execute(text(f"ALTER TABLE videos ADD COLUMN {column_name} {column_definition}"))
+            db.session.commit()
+            from app.models import Video, utc_now
+
+            legacy_expiry = utc_now() + app.config["VIDEO_RETENTION_PERIOD"]
+            for video in Video.query.filter(Video.expires_at.is_(None)).yield_per(100):
+                video.expires_at = legacy_expiry
+            db.session.commit()
+            hash_index = next(
+                index
+                for index in db.metadata.tables["videos"].indexes
+                if index.name == "ix_videos_content_sha256"
+            )
+            hash_index.create(bind=db.engine, checkfirst=True)
         if "road_marking_detections" not in inspector.get_table_names():
             db.create_all()
         remove_detection_filename_uniqueness()
@@ -145,6 +168,7 @@ def create_app():
     debug = os.getenv("FLASK_DEBUG", "0").lower() in {"1", "true", "yes"}
     max_upload_mb = positive_int_setting("MAX_UPLOAD_MB", 500)
     max_extracted_frames = positive_int_setting("MAX_EXTRACTED_FRAMES", 500)
+    video_retention_hours = positive_int_setting("VIDEO_RETENTION_HOURS", 24)
 
     database_url = os.getenv("DATABASE_URL", "sqlite:///instance/road_safety.db")
     if database_url.startswith("postgres://"):
@@ -153,13 +177,17 @@ def create_app():
         database_url = "postgresql+psycopg://" + database_url[len("postgresql://") :]
     database_url = sqlite_uri(app.instance_path, database_url)
 
+    media_backend = os.getenv("MEDIA_STORAGE", "filesystem").strip().lower()
+    if media_backend not in {"filesystem", "s3"}:
+        raise RuntimeError("MEDIA_STORAGE must be either 'filesystem' or 's3'.")
     media_root = Path(os.getenv("MEDIA_ROOT", Path(app.instance_path) / "uploads"))
     video_upload_folder = media_root / "videos"
-    video_upload_folder.mkdir(parents=True, exist_ok=True)
     frame_upload_folder = media_root / "frames"
-    frame_upload_folder.mkdir(parents=True, exist_ok=True)
     detection_upload_folder = media_root / "detections"
-    detection_upload_folder.mkdir(parents=True, exist_ok=True)
+    if media_backend == "filesystem":
+        video_upload_folder.mkdir(parents=True, exist_ok=True)
+        frame_upload_folder.mkdir(parents=True, exist_ok=True)
+        detection_upload_folder.mkdir(parents=True, exist_ok=True)
     model_folder = Path(os.getenv("MODEL_DIR", Path(app.instance_path) / "models"))
     if not model_folder.is_absolute():
         model_folder = BASE_DIR / model_folder
@@ -196,6 +224,7 @@ def create_app():
     app.config["VIDEO_UPLOAD_FOLDER"] = str(video_upload_folder)
     app.config["FRAME_UPLOAD_FOLDER"] = str(frame_upload_folder)
     app.config["DETECTION_UPLOAD_FOLDER"] = str(detection_upload_folder)
+    app.config["MEDIA_STORAGE_BACKEND"] = media_backend
     app.config["MODEL_DIR"] = str(model_folder)
     app.config["TRAFFIC_SIGN_MODEL_PATH"] = str(configured_traffic_sign_path)
     app.config["SPEED_HUMP_MODEL_PATH"] = str(
@@ -235,6 +264,23 @@ def create_app():
     app.config["MAX_EXTRACTED_FRAMES"] = max_extracted_frames
     app.config["MAX_CONTENT_LENGTH"] = max_upload_mb * 1024 * 1024
     app.config["MAX_UPLOAD_MB"] = max_upload_mb
+    app.config["VIDEO_RETENTION_HOURS"] = video_retention_hours
+    app.config["VIDEO_RETENTION_PERIOD"] = timedelta(hours=video_retention_hours)
+
+    app.extensions["media_storage"] = MediaStorage(
+        backend=media_backend,
+        roots={
+            "videos": video_upload_folder,
+            "frames": frame_upload_folder,
+            "detections": detection_upload_folder,
+            "models": model_folder / "traffic_signs",
+        },
+        bucket=os.getenv("S3_BUCKET"),
+        region=os.getenv("S3_REGION"),
+        endpoint_url=os.getenv("S3_ENDPOINT_URL"),
+        access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+        secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+    )
 
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 

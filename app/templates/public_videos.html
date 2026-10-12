@@ -14,8 +14,7 @@
                 <article class="video-item">
                     <div>
                         <h3>{{ video.title }}</h3>
-                        <p class="video-meta">{{ video.location or 'Road location not provided' }} · Uploaded {{ video.uploaded_at.strftime("%d %b %Y, %H:%M") }}</p>
-                        <p class="video-meta">Uploaded by: {{ video.uploader.username }}</p>
+                        <p class="video-meta">{{ video.location or 'Road location not provided' }} · Uploaded {{ video.uploaded_at.strftime("%d %b %Y, %H:%M") }} · {{ video.video_status }}{% if video.expires_at %} · Expires {{ video.expires_at.strftime("%d %b %Y, %H:%M") }}{% endif %}</p>
                         {% if video.description %}<p>{{ video.description }}</p>{% endif %}
                     </div>
                     <div class="video-actions">

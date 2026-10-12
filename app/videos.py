@@ -1,6 +1,10 @@
+from datetime import timedelta
 from pathlib import Path
+from functools import wraps
 from math import isfinite
+from hashlib import sha256
 from itertools import chain
+import tempfile
 from threading import Lock
 from uuid import uuid4
 
@@ -11,7 +15,6 @@ from flask import (
     flash,
     redirect,
     render_template,
-    send_from_directory,
     url_for,
 )
 from flask_login import current_user, login_required
@@ -21,7 +24,8 @@ from werkzeug.utils import secure_filename
 from app.detectors import SpeedHumpDetector, TrafficSignDetector
 from app.extensions import db
 from app.forms import ALLOWED_VIDEO_EXTENSIONS, FrameExtractionForm, VideoUploadForm
-from app.models import Frame, RoadMarkingDetection, TrafficSignDetection, Video
+from app.media_storage import media_storage
+from app.models import Frame, RoadMarkingDetection, TrafficSignDetection, Video, utc_now
 
 videos_bp = Blueprint("videos", __name__)
 _EXTRACTION_LOCKS = {}
@@ -34,6 +38,7 @@ _TRAFFIC_SIGN_DETECTOR_KEY = None
 _FRAME_QUERY_BATCH_SIZE = 64
 _DETECTION_FLUSH_BATCH_SIZE = 16
 _EXTRACTION_FLUSH_BATCH_SIZE = 50
+_ROAD_MARKING_MAX_IMAGE_SIDE = 1280
 TRAFFIC_SIGN_CLASS_ID = 11
 TRAFFIC_SIGN_CLASS_NAME = "stop sign"
 
@@ -44,6 +49,17 @@ VIDEO_MIME_TYPES = {
     "avi": "video/x-msvideo",
     "mkv": "video/x-matroska",
 }
+
+
+def analyst_or_admin_required(view):
+    @wraps(view)
+    @login_required
+    def wrapped(*args, **kwargs):
+        if not current_user.is_admin() and not current_user.is_analyst():
+            abort(403)
+        return view(*args, **kwargs)
+
+    return wrapped
 
 
 def allowed_video_file(filename):
@@ -59,24 +75,6 @@ def stored_video_name(original_filename):
     return f"{uuid4().hex}_{safe_stem}.{extension}"
 
 
-def upload_folder():
-    folder = Path(current_app.config["VIDEO_UPLOAD_FOLDER"])
-    folder.mkdir(parents=True, exist_ok=True)
-    return folder
-
-
-def frame_folder():
-    folder = Path(current_app.config["FRAME_UPLOAD_FOLDER"])
-    folder.mkdir(parents=True, exist_ok=True)
-    return folder
-
-
-def detection_folder():
-    folder = Path(current_app.config["DETECTION_UPLOAD_FOLDER"])
-    folder.mkdir(parents=True, exist_ok=True)
-    return folder
-
-
 def annotated_video_name(video_id):
     return f"video_{video_id}_analysed.mp4"
 
@@ -85,24 +83,30 @@ def frame_name(video_id, frame_number):
     return f"video_{video_id}_{frame_number}_{uuid4().hex}.jpg"
 
 
-def cleanup_extraction_files(paths, video_id):
-    for path in set(paths):
+def remove_media_files(category, filenames):
+    for filename in set(filter(None, filenames)):
         try:
-            path.unlink(missing_ok=True)
-        except OSError:
+            media_storage().delete(category, filename)
+        except Exception:
             current_app.logger.exception(
-                "Could not remove extraction media for video %s: %s",
-                video_id,
-                path,
+                "Could not remove unreferenced %s media %s", category, filename
             )
 
 
-def remove_frame_files(frames):
-    folder = frame_folder()
-    for frame in frames:
-        path = folder / frame.filename
-        if path.is_file():
-            path.unlink()
+def media_response(category, filename, mimetype):
+    try:
+        return media_storage().send(category, filename, mimetype)
+    except FileNotFoundError:
+        abort(404)
+
+
+def upload_sha256(uploaded_file):
+    digest = sha256()
+    stream = uploaded_file.stream
+    while chunk := stream.read(1024 * 1024):
+        digest.update(chunk)
+    stream.seek(0)
+    return digest.hexdigest()
 
 
 def extraction_lock(video_id):
@@ -162,6 +166,20 @@ def traffic_sign_model():
         cpu_threads,
     )
     with _TRAFFIC_SIGN_MODEL_LOCK:
+        if (
+            current_app.config["MEDIA_STORAGE_BACKEND"] == "s3"
+            and not model_path.is_file()
+        ):
+            if not model_path.is_file():
+                try:
+                    media_storage().materialize(
+                        "models", model_path.name, model_path
+                    )
+                except FileNotFoundError as error:
+                    raise RuntimeError(
+                        "Traffic-sign model weights are missing from the configured media bucket. "
+                        f"Upload {model_path.name} to the bucket's models/ key."
+                    ) from error
         if _TRAFFIC_SIGN_DETECTOR_KEY != detector_key:
             _TRAFFIC_SIGN_DETECTOR = TrafficSignDetector(
                 model_path=model_path,
@@ -192,96 +210,97 @@ def detect_traffic_signs(video):
     if not frame_count:
         raise RuntimeError("Extract frames before detecting traffic signs.")
     if not detector.is_available():
-        expected_path = getattr(
-            detector,
-            "model_path",
-            current_app.config["TRAFFIC_SIGN_MODEL_PATH"],
-        )
         raise RuntimeError(
             "Traffic-sign YOLOv8 weights were not found. "
-            f"Expected file: {expected_path}. Set TRAFFIC_SIGN_MODEL_PATH "
-            "to the model file or include it at the configured model path."
+            f"Expected file: {getattr(detector, 'model_path', current_app.config['TRAFFIC_SIGN_MODEL_PATH'])}. "
+            "Set TRAFFIC_SIGN_MODEL_PATH to the model file or include it at the configured model path."
         )
 
-    old_annotated = detection_annotation_filenames(TrafficSignDetection, video.id)
+    storage = media_storage()
+    old_annotated = detection_annotation_filenames(
+        TrafficSignDetection, video.id
+    )
+    db.session.query(TrafficSignDetection).filter_by(video_id=video.id).delete(
+        synchronize_session="fetch"
+    )
+    db.session.flush()
     detection_count = 0
     created_files = []
     try:
-        db.session.query(TrafficSignDetection).filter_by(video_id=video.id).delete(
-            synchronize_session=False
-        )
-        db.session.flush()
         for frame_number, frame in enumerate(iter_video_frames(video.id), start=1):
-            frame_path = frame_folder() / frame.filename
-            if not frame_path.is_file():
-                continue
-            import cv2
+            if not storage.exists("frames", frame.filename):
+                image = None
+                detections = None
+            else:
+                import cv2
 
-            image = cv2.imread(str(frame_path))
-            if image is None:
-                continue
-            try:
-                detections = detector.predict(image)
-                if detections:
-                    annotated_filename = f"traffic_{video.id}_frame_{frame.id}_{uuid4().hex}.jpg"
-                    for detection in detections:
-                        cv2.rectangle(
-                            image,
-                            (int(detection["x_min"]), int(detection["y_min"])),
-                            (int(detection["x_max"]), int(detection["y_max"])),
-                            (0, 200, 0),
-                            2,
+                with storage.local_path("frames", frame.filename) as frame_path:
+                    image = cv2.imread(str(frame_path))
+                if image is None:
+                    detections = None
+                else:
+                    detections = detector.predict(image)
+                    if detections:
+                        annotated_filename = (
+                            f"traffic_{video.id}_frame_{frame.id}_{uuid4().hex}.jpg"
                         )
-                        cv2.putText(
-                            image,
-                            f"{detection['class_name']} {detection['confidence']:.2f}",
-                            (int(detection["x_min"]), max(20, int(detection["y_min"]) - 8)),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            0.6,
-                            (0, 200, 0),
-                            2,
-                        )
-                    annotated_path = detection_folder() / annotated_filename
-                    if not cv2.imwrite(str(annotated_path), image):
-                        raise RuntimeError(
-                            "The annotated traffic-sign image could not be saved."
-                        )
-                    created_files.append(annotated_path)
-                    for detection in detections:
-                        db.session.add(
-                            TrafficSignDetection(
-                                video_id=video.id,
-                                frame_id=frame.id,
-                                class_name=detection["class_name"],
-                                confidence=detection["confidence"],
-                                frame_number=frame.frame_number,
-                                timestamp_seconds=frame.timestamp_seconds,
-                                frame_filename=frame.filename,
-                                annotated_filename=annotated_filename,
-                                x_min=detection["x_min"],
-                                y_min=detection["y_min"],
-                                x_max=detection["x_max"],
-                                y_max=detection["y_max"],
+                        for detection in detections:
+                            cv2.rectangle(
+                                image,
+                                (int(detection["x_min"]), int(detection["y_min"])),
+                                (int(detection["x_max"]), int(detection["y_max"])),
+                                (0, 200, 0),
+                                2,
                             )
-                        )
-                        detection_count += 1
-                    del annotated_path, annotated_filename
-                del detections
-            finally:
-                del image
+                            cv2.putText(
+                                image,
+                                f"{detection['class_name']} {detection['confidence']:.2f}",
+                                (
+                                    int(detection["x_min"]),
+                                    max(20, int(detection["y_min"]) - 8),
+                                ),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.6,
+                                (0, 200, 0),
+                                2,
+                            )
+                        created_files.append(annotated_filename)
+                        if not storage.save_image(
+                            "detections", annotated_filename, image
+                        ):
+                            raise RuntimeError(
+                                "The annotated traffic-sign image could not be saved."
+                            )
+                        for detection in detections:
+                            db.session.add(
+                                TrafficSignDetection(
+                                    video_id=video.id,
+                                    frame_id=frame.id,
+                                    class_name=detection["class_name"],
+                                    confidence=detection["confidence"],
+                                    frame_number=frame.frame_number,
+                                    timestamp_seconds=frame.timestamp_seconds,
+                                    frame_filename=frame.filename,
+                                    annotated_filename=annotated_filename,
+                                    x_min=detection["x_min"],
+                                    y_min=detection["y_min"],
+                                    x_max=detection["x_max"],
+                                    y_max=detection["y_max"],
+                                )
+                            )
+                            detection_count += 1
+                if image is not None:
+                    del image
+                if detections is not None:
+                    del detections
             if frame_number % _DETECTION_FLUSH_BATCH_SIZE == 0:
                 db.session.flush()
         db.session.commit()
     except Exception:
         db.session.rollback()
-        for path in created_files:
-            if path.is_file():
-                path.unlink()
+        remove_media_files("detections", created_files)
         raise
-    for filename in old_annotated:
-        path = detection_folder() / filename
-        if path.is_file():
-            path.unlink()
+    remove_media_files("detections", old_annotated)
     return detection_count, frame_count
 
 
@@ -289,7 +308,21 @@ def predict_road_markings(image):
     import cv2
     import numpy as np
 
-    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    image_height, image_width = image.shape[:2]
+    scale = max(image_height, image_width) / _ROAD_MARKING_MAX_IMAGE_SIDE
+    if scale > 1:
+        processing_width = max(1, round(image_width / scale))
+        processing_height = max(1, round(image_height / scale))
+        processing_image = cv2.resize(
+            image,
+            (processing_width, processing_height),
+            interpolation=cv2.INTER_AREA,
+        )
+    else:
+        scale = 1.0
+        processing_image = image
+
+    hsv = cv2.cvtColor(processing_image, cv2.COLOR_BGR2HSV)
     white_mask = cv2.inRange(hsv, (0, 0, 180), (180, 80, 255))
     yellow_mask = cv2.inRange(hsv, (15, 80, 80), (45, 255, 255))
     mask = cv2.bitwise_or(white_mask, yellow_mask)
@@ -297,19 +330,21 @@ def predict_road_markings(image):
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    del hsv, white_mask, yellow_mask, mask, kernel
+    del hsv, white_mask, yellow_mask, mask, kernel, processing_image
     detections = []
     for contour in contours:
-        area = cv2.contourArea(contour)
+        area = cv2.contourArea(contour) * scale**2
         if area < 250:
             continue
         x, y, w, h = cv2.boundingRect(contour)
         if w <= 0 or h <= 0:
             continue
-        ratio = w / max(h, 1)
+        original_width = w * scale
+        original_height = h * scale
+        ratio = original_width / max(original_height, 1)
         if ratio >= 2.5:
             class_name = "lane marking"
-        elif w > 40 and h > 25:
+        elif original_width > 40 and original_height > 25:
             class_name = "zebra crossing"
         else:
             class_name = "arrow marking"
@@ -319,10 +354,10 @@ def predict_road_markings(image):
             {
                 "class_name": class_name,
                 "confidence": float(confidence),
-                "x_min": max(0, x),
-                "y_min": max(0, y),
-                "x_max": min(image.shape[1], x + w),
-                "y_max": min(image.shape[0], y + h),
+                "x_min": max(0, round(x * scale)),
+                "y_min": max(0, round(y * scale)),
+                "x_max": min(image_width, round((x + w) * scale)),
+                "y_max": min(image_height, round((y + h) * scale)),
             }
         )
     return detections
@@ -333,85 +368,91 @@ def detect_road_markings(video):
     if not frame_count:
         raise RuntimeError("Extract frames before detecting road markings.")
 
-    old_annotated = detection_annotation_filenames(RoadMarkingDetection, video.id)
+    storage = media_storage()
+    old_annotated = detection_annotation_filenames(
+        RoadMarkingDetection, video.id
+    )
+    db.session.query(RoadMarkingDetection).filter_by(video_id=video.id).delete(
+        synchronize_session="fetch"
+    )
+    db.session.flush()
     detection_count = 0
     created_files = []
     try:
-        db.session.query(RoadMarkingDetection).filter_by(video_id=video.id).delete(
-            synchronize_session=False
-        )
-        db.session.flush()
         for frame_number, frame in enumerate(iter_video_frames(video.id), start=1):
-            frame_path = frame_folder() / frame.filename
-            if not frame_path.is_file():
-                continue
-            import cv2
+            if not storage.exists("frames", frame.filename):
+                image = None
+                detections = None
+            else:
+                import cv2
 
-            image = cv2.imread(str(frame_path))
-            if image is None:
-                continue
-            try:
-                detections = predict_road_markings(image)
-                if detections:
-                    annotated_filename = f"markings_{video.id}_frame_{frame.id}_{uuid4().hex}.jpg"
-                    for detection in detections:
-                        cv2.rectangle(
-                            image,
-                            (int(detection["x_min"]), int(detection["y_min"])),
-                            (int(detection["x_max"]), int(detection["y_max"])),
-                            (0, 165, 255),
-                            2,
+                with storage.local_path("frames", frame.filename) as frame_path:
+                    image = cv2.imread(str(frame_path))
+                if image is None:
+                    detections = None
+                else:
+                    detections = predict_road_markings(image)
+                    if detections:
+                        annotated_filename = (
+                            f"markings_{video.id}_frame_{frame.id}_{uuid4().hex}.jpg"
                         )
-                        cv2.putText(
-                            image,
-                            f"{detection['class_name']} {detection['confidence']:.2f}",
-                            (int(detection["x_min"]), max(20, int(detection["y_min"]) - 8)),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            0.55,
-                            (0, 165, 255),
-                            2,
-                        )
-                    annotated_path = detection_folder() / annotated_filename
-                    if not cv2.imwrite(str(annotated_path), image):
-                        raise RuntimeError(
-                            "The annotated road-marking image could not be saved."
-                        )
-                    created_files.append(annotated_path)
-                    for detection in detections:
-                        db.session.add(
-                            RoadMarkingDetection(
-                                video_id=video.id,
-                                frame_id=frame.id,
-                                class_name=detection["class_name"],
-                                confidence=detection["confidence"],
-                                frame_number=frame.frame_number,
-                                timestamp_seconds=frame.timestamp_seconds,
-                                frame_filename=frame.filename,
-                                annotated_filename=annotated_filename,
-                                x_min=detection["x_min"],
-                                y_min=detection["y_min"],
-                                x_max=detection["x_max"],
-                                y_max=detection["y_max"],
+                        for detection in detections:
+                            cv2.rectangle(
+                                image,
+                                (int(detection["x_min"]), int(detection["y_min"])),
+                                (int(detection["x_max"]), int(detection["y_max"])),
+                                (0, 165, 255),
+                                2,
                             )
-                        )
-                        detection_count += 1
-                    del annotated_path, annotated_filename
-                del detections
-            finally:
-                del image
+                            cv2.putText(
+                                image,
+                                f"{detection['class_name']} {detection['confidence']:.2f}",
+                                (
+                                    int(detection["x_min"]),
+                                    max(20, int(detection["y_min"]) - 8),
+                                ),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.55,
+                                (0, 165, 255),
+                                2,
+                            )
+                        created_files.append(annotated_filename)
+                        if not storage.save_image(
+                            "detections", annotated_filename, image
+                        ):
+                            raise RuntimeError(
+                                "The annotated road-marking image could not be saved."
+                            )
+                        for detection in detections:
+                            db.session.add(
+                                RoadMarkingDetection(
+                                    video_id=video.id,
+                                    frame_id=frame.id,
+                                    class_name=detection["class_name"],
+                                    confidence=detection["confidence"],
+                                    frame_number=frame.frame_number,
+                                    timestamp_seconds=frame.timestamp_seconds,
+                                    frame_filename=frame.filename,
+                                    annotated_filename=annotated_filename,
+                                    x_min=detection["x_min"],
+                                    y_min=detection["y_min"],
+                                    x_max=detection["x_max"],
+                                    y_max=detection["y_max"],
+                                )
+                            )
+                            detection_count += 1
+                if image is not None:
+                    del image
+                if detections is not None:
+                    del detections
             if frame_number % _DETECTION_FLUSH_BATCH_SIZE == 0:
                 db.session.flush()
         db.session.commit()
     except Exception:
         db.session.rollback()
-        for path in created_files:
-            if path.is_file():
-                path.unlink()
+        remove_media_files("detections", created_files)
         raise
-    for filename in old_annotated:
-        path = detection_folder() / filename
-        if path.is_file():
-            path.unlink()
+    remove_media_files("detections", old_annotated)
     return detection_count, frame_count
 
 
@@ -424,76 +465,110 @@ def generate_annotated_video(video):
     if not Frame.query.filter_by(video_id=video.id).count():
         raise RuntimeError("Extract frames before generating an analysed video.")
 
-    output_name = annotated_video_name(video.id)
-    output_path = detection_folder() / output_name
-    if output_path.exists():
-        output_path.unlink()
-
+    storage = media_storage()
     first_frame = next(
         (
             frame
             for frame in iter_video_frames(video.id)
-            if (frame_folder() / frame.filename).is_file()
+            if storage.exists("frames", frame.filename)
         ),
         None,
     )
     if first_frame is None:
         raise RuntimeError("No frames are available to create an analysed video.")
 
-    first_image = cv2.imread(str(frame_folder() / first_frame.filename))
-    if first_image is None:
-        raise RuntimeError("The first extracted frame could not be read.")
-
-    height, width = first_image.shape[:2]
-    fps = 25.0
-    frame_interval = max(first_frame.timestamp_seconds, 0.1)
-    fps = max(1.0, 1.0 / frame_interval)
-    del first_image
-
-    writer = cv2.VideoWriter(str(output_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
+    output_name = f"{annotated_video_name(video.id).removesuffix('.mp4')}_{uuid4().hex}.mp4"
+    previous_output = video.annotated_video_filename
     try:
-        if not writer.isOpened():
-            raise RuntimeError("OpenCV could not create the annotated output video.")
-        for frame in iter_video_frames(video.id):
-            image_path = frame_folder() / frame.filename
-            if not image_path.is_file():
-                continue
-            image = cv2.imread(str(image_path))
-            if image is None:
-                continue
-            detections = chain(
-                TrafficSignDetection.query.filter_by(frame_id=frame.id)
-                .order_by(TrafficSignDetection.confidence.desc())
-                .yield_per(_FRAME_QUERY_BATCH_SIZE),
-                RoadMarkingDetection.query.filter_by(frame_id=frame.id)
-                .order_by(RoadMarkingDetection.confidence.desc())
-                .yield_per(_FRAME_QUERY_BATCH_SIZE),
-            )
-            for detection in detections:
-                label = (detection.class_name or "object").upper()
-                confidence = float(detection.confidence or 0.0)
-                left = max(0, int(getattr(detection, "x_min", 0) or 0))
-                top = max(0, int(getattr(detection, "y_min", 0) or 0))
-                right = min(image.shape[1], int(getattr(detection, "x_max", image.shape[1]) or image.shape[1]))
-                bottom = min(image.shape[0], int(getattr(detection, "y_max", image.shape[0]) or image.shape[0]))
-                color = (0, 200, 0) if isinstance(detection, TrafficSignDetection) else (0, 165, 255)
-                cv2.rectangle(image, (left, top), (right, bottom), color, 2)
-                cv2.putText(
-                    image,
-                    f"{label} {confidence:.2f}",
-                    (left, max(20, top - 8)),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    color,
-                    2,
-                )
-            writer.write(image)
-            del detections, image
-    finally:
-        writer.release()
+        with tempfile.TemporaryDirectory(prefix="road-safety-video-") as temporary_dir:
+            output_path = Path(temporary_dir) / output_name
+            with storage.local_path("frames", first_frame.filename) as first_frame_path:
+                first_image = cv2.imread(str(first_frame_path))
+            if first_image is None:
+                raise RuntimeError("The first extracted frame could not be read.")
 
-    video.annotated_video_filename = output_name
-    db.session.commit()
+            height, width = first_image.shape[:2]
+            frame_interval = max(first_frame.timestamp_seconds, 0.1)
+            fps = max(1.0, 1.0 / frame_interval)
+            del first_image
+            writer = cv2.VideoWriter(
+                str(output_path),
+                cv2.VideoWriter_fourcc(*"mp4v"),
+                fps,
+                (width, height),
+            )
+            try:
+                if not writer.isOpened():
+                    raise RuntimeError(
+                        "OpenCV could not create the annotated output video."
+                    )
+                for frame in iter_video_frames(video.id):
+                    if not storage.exists("frames", frame.filename):
+                        continue
+                    with storage.local_path("frames", frame.filename) as image_path:
+                        image = cv2.imread(str(image_path))
+                    if image is None:
+                        continue
+                    detections = chain(
+                        TrafficSignDetection.query.filter_by(frame_id=frame.id)
+                        .order_by(TrafficSignDetection.confidence.desc())
+                        .yield_per(_FRAME_QUERY_BATCH_SIZE),
+                        RoadMarkingDetection.query.filter_by(frame_id=frame.id)
+                        .order_by(RoadMarkingDetection.confidence.desc())
+                        .yield_per(_FRAME_QUERY_BATCH_SIZE),
+                    )
+                    for detection in detections:
+                        label = (detection.class_name or "object").upper()
+                        confidence = float(detection.confidence or 0.0)
+                        left = max(0, int(getattr(detection, "x_min", 0) or 0))
+                        top = max(0, int(getattr(detection, "y_min", 0) or 0))
+                        right = min(
+                            image.shape[1],
+                            int(getattr(detection, "x_max", image.shape[1]) or image.shape[1]),
+                        )
+                        bottom = min(
+                            image.shape[0],
+                            int(getattr(detection, "y_max", image.shape[0]) or image.shape[0]),
+                        )
+                        color = (
+                            (0, 200, 0)
+                            if isinstance(detection, TrafficSignDetection)
+                            else (0, 165, 255)
+                        )
+                        cv2.rectangle(image, (left, top), (right, bottom), color, 2)
+                        cv2.putText(
+                            image,
+                            f"{label} {confidence:.2f}",
+                            (left, max(20, top - 8)),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.6,
+                            color,
+                            2,
+                        )
+                    writer.write(image)
+                    del detections, image
+            finally:
+                writer.release()
+
+            if not output_path.is_file() or output_path.stat().st_size == 0:
+                raise RuntimeError("OpenCV did not produce an annotated output video.")
+            storage.save_file("detections", output_name, output_path)
+
+        video.annotated_video_filename = output_name
+        try:
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+            remove_media_files("detections", [output_name])
+            raise
+    except Exception:
+        db.session.rollback()
+        if video.annotated_video_filename != output_name:
+            remove_media_files("detections", [output_name])
+        raise
+
+    if previous_output:
+        remove_media_files("detections", [previous_output])
     return output_name
 
 
@@ -503,98 +578,113 @@ def extract_video_frames(video, interval_seconds):
     except ImportError as error:
         raise RuntimeError("OpenCV is not installed. Run pip install -r requirements.txt.") from error
 
+    try:
+        interval_seconds = float(interval_seconds)
+    except (TypeError, ValueError):
+        interval_seconds = 0
     if not isfinite(interval_seconds) or interval_seconds <= 0:
         raise RuntimeError("Choose a valid extraction interval greater than zero seconds.")
-
-    video_path = upload_folder() / video.filename
-    if not video_path.is_file():
-        raise RuntimeError("The video file could not be found on the server.")
-
-    output_folder = frame_folder()
-    capture = None
-    old_detection_files = [
-        detection_folder() / filename
-        for filename in (
-            detection_annotation_filenames(TrafficSignDetection, video.id)
-            | detection_annotation_filenames(RoadMarkingDetection, video.id)
+    if video.video_file_expired:
+        raise RuntimeError(
+            "The source video file has expired or was deleted. Existing analysis results remain available."
         )
-    ]
-    old_frame_files = [
-        output_folder / filename
+
+    storage = media_storage()
+    if not storage.exists("videos", video.filename):
+        raise RuntimeError("The video file could not be found on the server.")
+    capture = None
+    old_frame_filenames = [
+        filename
         for (filename,) in db.session.query(Frame.filename)
         .filter_by(video_id=video.id)
         .yield_per(_FRAME_QUERY_BATCH_SIZE)
     ]
-    old_annotated_video = (
-        detection_folder() / video.annotated_video_filename
-        if video.annotated_video_filename
-        else None
-    )
-    saved_paths = []
+    old_annotated_files = detection_annotation_filenames(
+        TrafficSignDetection, video.id
+    ) | detection_annotation_filenames(RoadMarkingDetection, video.id)
+    old_annotated_video = video.annotated_video_filename
+    saved_filenames = []
     pending_frames = []
     try:
         db.session.query(TrafficSignDetection).filter_by(video_id=video.id).delete(
-            synchronize_session=False
+            synchronize_session="fetch"
         )
         db.session.query(RoadMarkingDetection).filter_by(video_id=video.id).delete(
-            synchronize_session=False
+            synchronize_session="fetch"
         )
         db.session.query(Frame).filter_by(video_id=video.id).delete(
-            synchronize_session=False
+            synchronize_session="fetch"
         )
         db.session.flush()
 
-        capture = cv2.VideoCapture(str(video_path))
-        if not capture.isOpened():
-            raise RuntimeError(
-                "OpenCV could not open this video. Try a standard MP4 (H.264) or AVI file."
+        with storage.local_path("videos", video.filename) as video_path:
+            capture = cv2.VideoCapture(str(video_path))
+            if not capture.isOpened():
+                capture.release()
+                capture = None
+                raise RuntimeError(
+                    "OpenCV could not open this video. Try a standard MP4 (H.264) or AVI file."
+                )
+
+            fps_value = float(capture.get(cv2.CAP_PROP_FPS) or 0)
+            fps = fps_value if isfinite(fps_value) and fps_value > 0 else None
+            frame_count_value = float(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+            total_frames = (
+                int(frame_count_value)
+                if isfinite(frame_count_value) and frame_count_value > 0
+                else None
             )
+            duration = total_frames / fps if total_frames and fps else None
+            step_frames = max(1, round((fps or 1) * interval_seconds))
+            max_frames = current_app.config["MAX_EXTRACTED_FRAMES"]
+            extracted = 0
+            frame_number = 0
+            next_frame = 0
 
-        fps_value = float(capture.get(cv2.CAP_PROP_FPS) or 0)
-        fps = fps_value if isfinite(fps_value) and fps_value > 0 else None
-        frame_count_value = float(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-        total_frames = int(frame_count_value) if frame_count_value > 0 else None
-        duration = total_frames / fps if total_frames and fps else None
-        step_frames = max(1, round((fps or 1) * interval_seconds))
-        max_frames = current_app.config["MAX_EXTRACTED_FRAMES"]
-        extracted = 0
-        frame_number = 0
-        next_frame = 0
-
-        while extracted < max_frames:
-            success, image = capture.read()
-            if not success:
-                break
             try:
-                if frame_number >= next_frame:
-                    filename = frame_name(video.id, frame_number)
-                    path = output_folder / filename
-                    if not cv2.imwrite(str(path), image):
-                        raise RuntimeError("OpenCV could not save an extracted frame.")
-                    saved_paths.append(path)
-                    frame_record = Frame(
-                        video_id=video.id,
-                        frame_number=frame_number,
-                        timestamp_seconds=frame_number / (fps or 1),
-                        filename=filename,
-                    )
-                    db.session.add(frame_record)
-                    pending_frames.append(frame_record)
-                    extracted += 1
-                    next_frame += step_frames
-                    if len(pending_frames) >= _EXTRACTION_FLUSH_BATCH_SIZE:
-                        db.session.flush()
-                        for record in pending_frames:
-                            db.session.expunge(record)
-                        pending_frames.clear()
+                while extracted < max_frames:
+                    success, image = capture.read()
+                    if not success:
+                        break
+                    if frame_number >= next_frame:
+                        filename = frame_name(video.id, frame_number)
+                        try:
+                            frame_saved = storage.save_image("frames", filename, image)
+                        except cv2.error as error:
+                            raise RuntimeError(
+                                f"OpenCV could not write extracted frame {frame_number} to media storage."
+                            ) from error
+                        if not frame_saved:
+                            raise RuntimeError(
+                                f"OpenCV could not write extracted frame {frame_number} to media storage."
+                            )
+                        saved_filenames.append(filename)
+                        frame_record = Frame(
+                            video_id=video.id,
+                            frame_number=frame_number,
+                            timestamp_seconds=frame_number / (fps or 1),
+                            filename=filename,
+                        )
+                        db.session.add(frame_record)
+                        pending_frames.append(frame_record)
+                        extracted += 1
+                        next_frame += step_frames
+                        if len(pending_frames) >= _EXTRACTION_FLUSH_BATCH_SIZE:
+                            db.session.flush()
+                            for record in pending_frames:
+                                db.session.expunge(record)
+                            pending_frames.clear()
+                    del image
+                    frame_number += 1
             finally:
-                del image
-            frame_number += 1
+                capture.release()
+                capture = None
 
         if extracted == 0:
             raise RuntimeError(
                 "No frames could be extracted. The video may be empty, damaged, or encoded with an unsupported codec."
             )
+
         if pending_frames:
             db.session.flush()
             for record in pending_frames:
@@ -606,28 +696,28 @@ def extract_video_frames(video, interval_seconds):
         db.session.commit()
     except cv2.error as error:
         db.session.rollback()
-        cleanup_extraction_files(saved_paths, video.id)
+        remove_media_files("frames", saved_filenames)
         raise RuntimeError(
             "OpenCV could not decode this video. Try converting it to a standard MP4 (H.264) or AVI file."
         ) from error
     except Exception:
         db.session.rollback()
-        cleanup_extraction_files(saved_paths, video.id)
+        remove_media_files("frames", saved_filenames)
         raise
     finally:
         if capture is not None:
             capture.release()
 
-    old_files = old_frame_files + old_detection_files
-    if old_annotated_video is not None:
-        old_files.append(old_annotated_video)
-    cleanup_extraction_files(old_files, video.id)
+    remove_media_files("frames", old_frame_filenames)
+    remove_media_files("detections", old_annotated_files)
+    if old_annotated_video:
+        remove_media_files("detections", [old_annotated_video])
 
     return extracted, fps, total_frames, duration, extracted >= max_frames
 
 
 @videos_bp.route("/videos", methods=["GET", "POST"])
-@login_required
+@analyst_or_admin_required
 def library():
     form = VideoUploadForm()
     if form.validate_on_submit():
@@ -641,27 +731,54 @@ def library():
             )
             return redirect(url_for("videos.library"))
 
+        content_hash = upload_sha256(uploaded)
+        existing = Video.query.filter_by(content_sha256=content_hash).first()
+        if existing is not None:
+            flash(
+                f'This video is already stored as "{existing.title}". Reuse that record to rerun extraction or detection.',
+                "info",
+            )
+            return redirect(url_for("videos.watch", video_id=existing.id))
+
         filename = stored_video_name(original_name)
-        destination = upload_folder() / filename
         try:
-            uploaded.save(destination)
+            media_storage().save_upload(filename, uploaded)
+            uploaded_at = utc_now()
             video = Video(
                 title=form.title.data.strip(),
                 filename=filename,
                 original_filename=original_name,
+                content_sha256=content_hash,
                 location=(form.location.data or "").strip() or "Road location not provided",
                 description=(form.description.data or "").strip() or None,
                 uploaded_by=current_user.id,
+                uploaded_at=uploaded_at,
+                expires_at=uploaded_at + timedelta(
+                    hours=current_app.config["VIDEO_RETENTION_HOURS"]
+                ),
                 processing_status="uploaded",
                 analysis_status="not_started",
             )
             db.session.add(video)
             db.session.commit()
+        except SQLAlchemyError:
+            db.session.rollback()
+            remove_media_files("videos", [filename])
+            existing = Video.query.filter_by(content_sha256=content_hash).first()
+            if existing is not None:
+                flash(
+                    f'This video is already stored as "{existing.title}". Reuse that record to rerun extraction or detection.',
+                    "info",
+                )
+                return redirect(url_for("videos.watch", video_id=existing.id))
+            current_app.logger.exception("Could not save uploaded video metadata")
+            flash("The video could not be saved to the database. Please try again.", "error")
+            return redirect(url_for("videos.library"))
         except Exception:
             db.session.rollback()
-            if destination.is_file():
-                destination.unlink()
-            flash("The video could not be saved. Please try again.", "error")
+            remove_media_files("videos", [filename])
+            current_app.logger.exception("Could not store uploaded video media")
+            flash("The video could not be stored. Check the configured media storage and try again.", "error")
             return redirect(url_for("videos.library"))
         flash("Road video uploaded successfully.", "success")
         return redirect(url_for("videos.library"))
@@ -680,7 +797,7 @@ def library():
 
 
 @videos_bp.route("/videos/<int:video_id>")
-@login_required
+@analyst_or_admin_required
 def watch(video_id):
     video = db.session.get(Video, video_id)
     if video is None:
@@ -703,21 +820,20 @@ def watch(video_id):
 
 
 @videos_bp.route("/videos/<int:video_id>/annotated")
-@login_required
+@analyst_or_admin_required
 def annotated_media(video_id):
     video = db.session.get(Video, video_id)
     if video is None:
         abort(404)
     if not video.annotated_video_filename:
         abort(404)
-    path = detection_folder() / video.annotated_video_filename
-    if not path.is_file():
-        abort(404)
-    return send_from_directory(detection_folder(), video.annotated_video_filename, mimetype="video/mp4")
+    return media_response(
+        "detections", video.annotated_video_filename, "video/mp4"
+    )
 
 
 @videos_bp.route("/videos/<int:video_id>/detect-signs", methods=["POST"])
-@login_required
+@analyst_or_admin_required
 def detect_signs(video_id):
     video = db.session.get(Video, video_id)
     if video is None:
@@ -732,19 +848,37 @@ def detect_signs(video_id):
             video.analysis_status = "processing"
             db.session.commit()
             detected, frame_count = detect_traffic_signs(video)
-            if detected:
-                try:
-                    generate_annotated_video(video)
-                except RuntimeError:
-                    pass
-            video.analysis_status = "analysed" if detected else "failed"
-            video.processing_status = "analysed" if detected else "failed"
+            try:
+                generate_annotated_video(video)
+            except Exception:
+                current_app.logger.exception(
+                    "Could not generate annotated video for video %s", video.id
+                )
+                flash(
+                    "Traffic-sign detections were saved, but the annotated video could not be generated.",
+                    "warning",
+                )
+            video.analysis_status = "analysed"
+            video.processing_status = "analysed"
             db.session.commit()
         except RuntimeError as error:
             video.analysis_status = "failed"
             video.processing_status = "failed"
             db.session.commit()
             flash(str(error), "error")
+            return redirect(url_for("videos.watch", video_id=video.id))
+        except Exception:
+            db.session.rollback()
+            current_app.logger.exception(
+                "Traffic-sign detection failed for video %s", video.id
+            )
+            video.analysis_status = "failed"
+            video.processing_status = "failed"
+            db.session.commit()
+            flash(
+                "Traffic-sign detection failed. Previously saved detections were preserved; the error was logged.",
+                "error",
+            )
             return redirect(url_for("videos.watch", video_id=video.id))
         flash(
             f"Traffic-sign detection completed: {detected} sign(s) found across {frame_count} extracted frame(s).",
@@ -756,7 +890,7 @@ def detect_signs(video_id):
 
 
 @videos_bp.route("/videos/<int:video_id>/detect-markings", methods=["POST"])
-@login_required
+@analyst_or_admin_required
 def detect_markings(video_id):
     video = db.session.get(Video, video_id)
     if video is None:
@@ -771,19 +905,37 @@ def detect_markings(video_id):
             video.analysis_status = "processing"
             db.session.commit()
             detected, frame_count = detect_road_markings(video)
-            if detected:
-                try:
-                    generate_annotated_video(video)
-                except RuntimeError:
-                    pass
-            video.analysis_status = "analysed" if detected else "failed"
-            video.processing_status = "analysed" if detected else "failed"
+            try:
+                generate_annotated_video(video)
+            except Exception:
+                current_app.logger.exception(
+                    "Could not generate annotated video for video %s", video.id
+                )
+                flash(
+                    "Road-marking detections were saved, but the annotated video could not be generated.",
+                    "warning",
+                )
+            video.analysis_status = "analysed"
+            video.processing_status = "analysed"
             db.session.commit()
         except RuntimeError as error:
             video.analysis_status = "failed"
             video.processing_status = "failed"
             db.session.commit()
             flash(str(error), "error")
+            return redirect(url_for("videos.watch", video_id=video.id))
+        except Exception:
+            db.session.rollback()
+            current_app.logger.exception(
+                "Road-marking detection failed for video %s", video.id
+            )
+            video.analysis_status = "failed"
+            video.processing_status = "failed"
+            db.session.commit()
+            flash(
+                "Road-marking detection failed. Previously saved detections were preserved; the error was logged.",
+                "error",
+            )
             return redirect(url_for("videos.watch", video_id=video.id))
         flash(
             f"Road-marking detection completed: {detected} marking(s) found across {frame_count} extracted frame(s).",
@@ -795,33 +947,39 @@ def detect_markings(video_id):
 
 
 @videos_bp.route("/videos/<int:video_id>/detections/<path:filename>")
-@login_required
+@analyst_or_admin_required
 def detection_media(video_id, filename):
     detection = TrafficSignDetection.query.filter_by(
         video_id=video_id, annotated_filename=filename
     ).first()
     if detection is None:
         abort(404)
-    return send_from_directory(detection_folder(), filename, mimetype="image/jpeg")
+    return media_response("detections", filename, "image/jpeg")
 
 
 @videos_bp.route("/videos/<int:video_id>/markings/<path:filename>")
-@login_required
+@analyst_or_admin_required
 def marking_media(video_id, filename):
     detection = RoadMarkingDetection.query.filter_by(
         video_id=video_id, annotated_filename=filename
     ).first()
     if detection is None:
         abort(404)
-    return send_from_directory(detection_folder(), filename, mimetype="image/jpeg")
+    return media_response("detections", filename, "image/jpeg")
 
 
 @videos_bp.route("/videos/<int:video_id>/extract", methods=["POST"])
-@login_required
+@analyst_or_admin_required
 def extract(video_id):
     video = db.session.get(Video, video_id)
     if video is None:
         abort(404)
+    if video.video_file_expired:
+        flash(
+            "The source video file has expired or was deleted. Existing analysis results remain available.",
+            "error",
+        )
+        return redirect(url_for("videos.watch", video_id=video.id))
 
     lock = extraction_lock(video.id)
     if not lock.acquire(blocking=False):
@@ -854,7 +1012,7 @@ def extract(video_id):
                 "Frame extraction could not access storage for video %s", video.id
             )
             flash(
-                "The video or frame storage is unavailable. Check that the Render disk is mounted and that MEDIA_ROOT is writable.",
+                "The video or frame storage is unavailable. Check that the Render disk is mounted and that MEDIA_ROOT is writable. For S3 storage, verify the configured durable media-storage settings.",
                 "error",
             )
             return redirect(url_for("videos.watch", video_id=video.id))
@@ -895,39 +1053,42 @@ def extract(video_id):
 
 
 @videos_bp.route("/videos/<int:video_id>/frames/<int:frame_id>/file")
-@login_required
+@analyst_or_admin_required
 def frame_media(video_id, frame_id):
     frame = db.session.get(Frame, frame_id)
     if frame is None or frame.video_id != video_id:
         abort(404)
-    folder = frame_folder()
-    if not (folder / frame.filename).is_file():
-        abort(404)
-    return send_from_directory(folder, frame.filename, mimetype="image/jpeg")
+    return media_response("frames", frame.filename, "image/jpeg")
 
 
 @videos_bp.route("/videos/<int:video_id>/file")
-@login_required
+@analyst_or_admin_required
 def media(video_id):
     video = db.session.get(Video, video_id)
     if video is None:
         abort(404)
-    folder = upload_folder()
-    path = folder / video.filename
-    if not path.is_file():
-        flash("The video file could not be found on the server.", "error")
-        return redirect(url_for("videos.library"))
+    if video.video_file_expired:
+        return (
+            "This video file has expired or was deleted. Its analysis results remain available.",
+            410,
+        )
     extension = video.filename.rsplit(".", 1)[-1].lower()
-    return send_from_directory(
-        folder,
-        video.filename,
-        mimetype=VIDEO_MIME_TYPES.get(extension, "application/octet-stream"),
-        as_attachment=False,
-    )
+    try:
+        return media_storage().send(
+            "videos",
+            video.filename,
+            mimetype=VIDEO_MIME_TYPES.get(extension, "application/octet-stream"),
+        )
+    except FileNotFoundError:
+        current_app.logger.warning("Source video file is missing for video %s", video.id)
+        return (
+            "This video file is unavailable. Its analysis results remain available.",
+            410,
+        )
 
 
 @videos_bp.route("/videos/<int:video_id>/delete", methods=["POST"])
-@login_required
+@analyst_or_admin_required
 def delete(video_id):
     if not current_user.is_admin():
         flash("Only administrators can delete road videos.", "error")
@@ -937,21 +1098,16 @@ def delete(video_id):
     if video is None:
         abort(404)
 
-    path = upload_folder() / video.filename
-    if path.is_file():
-        path.unlink()
-
-    remove_frame_files(video.frames)
-    detections = TrafficSignDetection.query.filter_by(video_id=video.id).all()
-    for detection in detections:
-        if detection.annotated_filename:
-            path = detection_folder() / detection.annotated_filename
-            if path.is_file():
-                path.unlink()
-    for detection in detections:
-        db.session.delete(detection)
-
-    db.session.delete(video)
-    db.session.commit()
-    flash("Road video deleted.", "success")
+    try:
+        media_storage().delete("videos", video.filename)
+        video.video_file_deleted_at = utc_now()
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        current_app.logger.exception(
+            "Could not delete source media for video %s", video.id
+        )
+        flash("The video file could not be deleted. Its record and analysis were preserved.", "error")
+        return redirect(url_for("videos.library"))
+    flash("Video file deleted. The video record and analysis history were preserved.", "success")
     return redirect(url_for("videos.library"))
